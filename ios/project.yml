@@ -10,8 +10,8 @@ settings:
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
-    # Set your team in Xcode (Signing & Capabilities) or here.
-    DEVELOPMENT_TEAM: ""
+    # AK's Apple developer team, so regenerating the project keeps signing set up.
+    DEVELOPMENT_TEAM: 2S5U54K6L4
     CODE_SIGN_STYLE: Automatic
 targets:
   LevelUP:
