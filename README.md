@@ -22,4 +22,4 @@ npm run serve      # http://localhost:8080
 ```
 
 ## One-time GitHub setup
-Settings → Pages → Source: **GitHub Actions**. Create a label named `read-later`.
+Settings → Pages → Source: **GitHub Actions**. Every issue in this repo that contains a link is treated as a Read Later item.

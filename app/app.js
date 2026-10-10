@@ -539,7 +539,7 @@ function setLater(id, patch) { const s = laterState(); s[id] = { ...(s[id] || {}
 
 async function githubOpenIssues(repo) {
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/issues?labels=read-later&state=all&per_page=50`, { headers: { accept: 'application/vnd.github+json' } });
+    const res = await fetch(`https://api.github.com/repos/${repo}/issues?state=all&per_page=50`, { headers: { accept: 'application/vnd.github+json' } });
     if (!res.ok) return [];
     return (await res.json()).filter((i) => !i.pull_request).map((i) => {
       const url = (i.body || i.title || '').match(/https?:\/\/[^\s<>()"']+/)?.[0];

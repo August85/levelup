@@ -1,4 +1,4 @@
-// Read Later inbox: every GitHub issue labelled "read-later" in this repo is a saved page
+// Read Later inbox: every GitHub issue in this repo whose body holds a link is a saved page
 // (the iOS Shortcut creates them from Safari's share sheet). Extracts readable text for each
 // and writes app/data/inbox.json. Reuses text already published so pages are fetched once.
 import { writeFileSync } from 'node:fs';
@@ -27,7 +27,7 @@ const gh = async (path) => {
 
 const issues = [];
 for (let page = 1; page < 20; page++) {
-  const batch = await gh(`/repos/${repo}/issues?labels=read-later&state=all&per_page=100&page=${page}`);
+  const batch = await gh(`/repos/${repo}/issues?state=all&per_page=100&page=${page}`);
   issues.push(...batch.filter((i) => !i.pull_request));
   if (batch.length < 100) break;
 }
