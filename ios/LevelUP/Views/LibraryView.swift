@@ -26,76 +26,137 @@ struct LibraryView: View {
         }
     }
 
+    /// The landing page: what to pick up again, then one tile per shelf.
     @ViewBuilder
     private func content(_ lib: Library) -> some View {
         let day = Int(Date().timeIntervalSince1970 / 86400)
         let catalog = (lib.principleCatalog ?? []).flatMap { c in c.items.map { (c.title, $0) } }
         let algos = (lib.algorithms ?? []).flatMap(\.items)
-        List {
-            Section {
+        let books = store.prep?.books ?? []
+        let ready = lib.volumes.filter(\.ready).count
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("KNOWLEDGE LIBRARY").font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.8)
                     Text(lib.title).font(.system(.title, design: .serif, weight: .bold))
                     Text(lib.subtitle).foregroundStyle(.secondary)
-                    Text("\(lib.volumes.filter(\.ready).count) of \(lib.volumes.count) volumes ready · \(catalog.count + lib.principles.count) principles · \(algos.count) algorithms")
-                        .font(.footnote).foregroundStyle(.secondary)
                 }
-                .padding(.vertical, 6)
-            }
 
-            if let v = lib.volume(lastVol), v.ready {
-                Section("Continue reading") {
-                    NavigationLink { VolumeView(volume: v) } label: { VolumeRow(volume: v) }
+                if let v = lib.volume(lastVol), v.ready {
+                    shelfHeader("Continue reading")
+                    NavigationLink { VolumeView(volume: v) } label: { VolumeRow(volume: v).padding(14).card() }
+                        .buttonStyle(.plain)
                 }
-            }
 
-            if !catalog.isEmpty {
-                let pick = catalog[day % catalog.count]
-                let cat = pick.0
-                let p = pick.1
-                Section("Principle of the day") {
-                    NavigationLink { ItemView(item: p, kind: "Principle", category: cat) } label: {
+                shelfHeader("Shelves")
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                    NavigationLink { VolumesView() } label: {
+                        ShelfTile(symbol: "books.vertical.fill", title: "DE Volumes", detail: "\(ready) of \(lib.volumes.count) ready", tint: .levelUp)
+                    }
+                    NavigationLink { BooksView() } label: {
+                        ShelfTile(symbol: "book.closed.fill", title: "Books", detail: books.isEmpty ? "Added from your Mac" : "\(books.count) books", tint: .brown)
+                    }
+                    NavigationLink { PrinciplesView() } label: {
+                        ShelfTile(symbol: "lightbulb.fill", title: "Design Principles", detail: "\(catalog.count + lib.principles.count) principles", tint: .orange)
+                    }
+                    NavigationLink { CollectionListView(title: "Algorithms", kind: "Algorithm", categories: lib.algorithms ?? []) } label: {
+                        ShelfTile(symbol: "function", title: "Algorithms", detail: "\(algos.count) algorithms", tint: .teal)
+                    }
+                    NavigationLink { ReviewView() } label: {
+                        ShelfTile(symbol: "checklist", title: "Review Mode", detail: "DE probes and checklists", tint: .purple)
+                    }
+                    NavigationLink { PrepView(embedded: true) } label: {
+                        ShelfTile(symbol: "briefcase.fill", title: "Interview Prep", detail: store.prep.map { "\($0.chapters.count) chapters" } ?? "Added from your Mac", tint: .indigo)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if !catalog.isEmpty {
+                    let pick = catalog[day % catalog.count]
+                    shelfHeader("Principle of the day")
+                    NavigationLink { ItemView(item: pick.1, kind: "Principle", category: pick.0) } label: {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(cat.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                            Text(p.name).font(.system(.title3, design: .serif, weight: .bold))
-                            Text(p.summary).font(.system(.body, design: .serif)).foregroundStyle(.secondary)
+                            Text(pick.0.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                            Text(pick.1.name).font(.system(.title3, design: .serif, weight: .bold))
+                            Text(pick.1.summary).font(.system(.body, design: .serif)).foregroundStyle(.secondary)
                         }
-                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16).card()
                     }
+                    .buttonStyle(.plain)
+                }
+
+                if let ideas = lib.keyIdeas, !ideas.isEmpty {
+                    let idea = ideas[(day * 7) % ideas.count]
+                    shelfHeader("Key idea · Vol \(idea.vol)")
+                    Text(idea.html.strippingTags).font(.system(.body, design: .serif))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16).card()
                 }
             }
-
-            if let ideas = lib.keyIdeas, !ideas.isEmpty {
-                let idea = ideas[(day * 7) % ideas.count]
-                Section("Key idea · Vol \(idea.vol)") {
-                    Text(idea.html.strippingTags).font(.system(.body, design: .serif)).padding(.vertical, 4)
-                }
-            }
-
-            Section("Collections") {
-                NavigationLink { PrinciplesView() } label: {
-                    CollectionRow(symbol: "lightbulb", title: "Design Principles", subtitle: "\(catalog.count + lib.principles.count) principles: a catalog plus those from each volume")
-                }
-                NavigationLink { CollectionListView(title: "Algorithms", kind: "Algorithm", categories: lib.algorithms ?? []) } label: {
-                    CollectionRow(symbol: "function", title: "Algorithms", subtitle: "\(algos.count) algorithms, from Raft to HNSW")
-                }
-                NavigationLink { ReviewView() } label: {
-                    CollectionRow(symbol: "checklist", title: "Review Mode", subtitle: "Every DE probe and checklist, for architecture-review prep")
-                }
-            }
-
-            ForEach(lib.parts) { part in
-                Section("Part \(part.id) · \(part.title)") {
-                    ForEach(part.volumes, id: \.self) { n in
-                        if let v = lib.volume(n) {
-                            NavigationLink { VolumeView(volume: v) } label: { VolumeRow(volume: v) }
-                        }
-                    }
-                }
-            }
-
-            Section { Text(lib.howTo).font(.footnote).foregroundStyle(.secondary) }
+            .padding(.horizontal)
+            .padding(.bottom, 24)
         }
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private func shelfHeader(_ title: String) -> some View {
+        Text(title).font(.title3.weight(.bold)).padding(.bottom, -10)
+    }
+}
+
+/// All 22 Distinguished Engineer volumes, grouped by part.
+struct VolumesView: View {
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        Group {
+            if let lib = store.library {
+                List {
+                    ForEach(lib.parts) { part in
+                        Section("Part \(part.id) · \(part.title)") {
+                            ForEach(part.volumes, id: \.self) { n in
+                                if let v = lib.volume(n) {
+                                    NavigationLink { VolumeView(volume: v) } label: { VolumeRow(volume: v) }
+                                }
+                            }
+                        }
+                    }
+                    Section { Text(lib.howTo).font(.footnote).foregroundStyle(.secondary) }
+                }
+            }
+        }
+        .navigationTitle("DE Volumes")
+    }
+}
+
+struct ShelfTile: View {
+    var symbol: String
+    var title: String
+    var detail: String
+    var tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.title2)
+                .foregroundStyle(tint)
+                .frame(width: 44, height: 44)
+                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Spacer(minLength: 0)
+            Text(title).font(.headline).foregroundStyle(.primary).lineLimit(2).minimumScaleFactor(0.85)
+            Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, minHeight: 132, alignment: .leading)
+        .padding(14)
+        .card()
+    }
+}
+
+extension View {
+    /// A white (or dark grey) rounded panel on the grouped background.
+    func card() -> some View {
+        background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

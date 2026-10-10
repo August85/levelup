@@ -6,14 +6,18 @@ import PDFKit
 struct PrepView: View {
     @EnvironmentObject var store: Store
     @AppStorage("prep.last") private var lastSlug = ""
+    /// True when pushed from the Library, which already provides the navigation stack.
+    var embedded = false
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let prep = store.prep { list(prep) } else { missing }
-            }
-            .navigationTitle("Interview Prep")
+        if embedded { page } else { NavigationStack { page } }
+    }
+
+    private var page: some View {
+        Group {
+            if let prep = store.prep { list(prep) } else { missing }
         }
+        .navigationTitle("Interview Prep")
     }
 
     private func list(_ prep: PrepContent) -> some View {
@@ -39,23 +43,6 @@ struct PrepView: View {
                     }
                 }
             }
-            if let books = prep.books, !books.isEmpty {
-                Section("Books") {
-                    ForEach(books) { b in
-                        NavigationLink { BookView(book: b) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "book.closed").font(.title3).foregroundStyle(Color.levelUp).frame(width: 34)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(b.title).font(.headline)
-                                    Text([b.author, b.pages.map { "\($0) pages" }].compactMap { $0 }.joined(separator: " · "))
-                                        .font(.subheadline).foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -63,7 +50,7 @@ struct PrepView: View {
         ContentUnavailableView {
             Label("Interview Prep isn't in this build", systemImage: "lock.doc")
         } description: {
-            Text("The course chapters and books are private, so they're added only when you build the app on your Mac. See ios/README.md.")
+            Text("The course chapters are private, so they're added only when you build the app on your Mac. See ios/README.md.")
         }
     }
 }
@@ -127,6 +114,38 @@ struct ChapterView: View {
     private func go(_ id: String) {
         jump = nil
         DispatchQueue.main.async { jump = id }
+    }
+}
+
+/// Your PDF books. They are private like the course, so they're bundled only in builds made on your Mac.
+struct BooksView: View {
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        Group {
+            if let books = store.prep?.books, !books.isEmpty {
+                List(books) { b in
+                    NavigationLink { BookView(book: b) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "book.closed.fill").font(.title3).foregroundStyle(.brown).frame(width: 34)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(b.title).font(.headline)
+                                Text([b.author, b.pages.map { "\($0) pages" }].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("No books in this build", systemImage: "book.closed")
+                } description: {
+                    Text("Books are private, so they're added only when you build the app on your Mac. Put PDFs in LevelUP-private/books and list them in interview/index.json.")
+                }
+            }
+        }
+        .navigationTitle("Books")
     }
 }
 
