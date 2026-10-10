@@ -8,13 +8,15 @@ struct LibraryView: View {
     @EnvironmentObject var store: Store
     @AppStorage("lastVol") private var lastVol: Int = 0
     @State private var showSettings = false
+    @State private var query = ""
 
     var body: some View {
         NavigationStack {
-            Group {
+            SearchSwitch(query: $query) {
                 if let lib = store.library { content(lib) } else { ProgressView("Loading library…") }
             }
             .navigationTitle("Library")
+            .searchable(text: $query, prompt: "Search everything")
             .toolbar {
                 Button { showSettings = true } label: { Image(systemName: "textformat.size") }
                     .accessibilityLabel("Reading settings")

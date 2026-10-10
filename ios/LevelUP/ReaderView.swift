@@ -8,6 +8,8 @@ struct ReaderView: UIViewRepresentable {
     var anchor: String? = nil
     var checkKey: String? = nil
     var highlight: String? = nil
+    /// Relative links and images resolve against this; Interview Prep uses lvl://private/interview/.
+    var baseURL: URL? = nil
 
     @AppStorage("fontSize") private var fontSize: Double = 19
     @AppStorage("serif") private var serif: Bool = true
@@ -17,6 +19,7 @@ struct ReaderView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.userContentController.add(context.coordinator, name: "check")
+        config.setURLSchemeHandler(AssetSchemeHandler(), forURLScheme: AssetSchemeHandler.scheme)
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.isOpaque = false
         wv.backgroundColor = .clear
@@ -33,7 +36,7 @@ struct ReaderView: UIViewRepresentable {
         let key = Self.page(html, fontSize: fontSize, serif: serif, checks: [], anchor: nil, highlight: highlight)
         if key != c.lastPage {
             c.lastPage = key
-            wv.loadHTMLString(Self.page(html, fontSize: fontSize, serif: serif, checks: checks, anchor: anchor, highlight: highlight), baseURL: Store.site)
+            wv.loadHTMLString(Self.page(html, fontSize: fontSize, serif: serif, checks: checks, anchor: anchor, highlight: highlight), baseURL: baseURL ?? Store.site)
         } else if let anchor, anchor != c.lastAnchor {
             wv.evaluateJavaScript("jump(\(Self.js(anchor)))")
         }
@@ -135,6 +138,9 @@ struct ReaderView: UIViewRepresentable {
     .muted { color: var(--ink3); }
     mark { background: var(--mark); color: inherit; border-radius: 3px; }
     .flash { animation: flash 1.6s ease-out; } @keyframes flash { from { background: var(--mark); } to { background: transparent; } }
+    figure.shot { margin: 1.4em 0; text-align: center; }
+    figure.shot img { display: block; width: 100%; background: #fff; border-radius: 10px; border: 1px solid var(--line); }
+    figure.shot figcaption { font-family: -apple-system, sans-serif; font-size: 13px; color: var(--ink3); margin-top: 6px; }
     h1.title { font-size: 1.6em; line-height: 1.15; margin: .3em 0 .3em; }
     """
 }

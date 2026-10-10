@@ -123,6 +123,20 @@ function collection(md, prefix) {
   flush();
   return cats;
 }
+// Practice decks: "## Deck" with a "> one-liner", then "### Question" with the answer below it.
+function practice(md) {
+  const decks = []; let deck = null, card = null;
+  const flush = () => { if (card) { card.md = card.body.join('\n').trim(); card.a = render(card.md, `${card.id}-`); delete card.body; } };
+  for (const line of md.split('\n')) {
+    let m;
+    if ((m = line.match(/^## (.+)/))) { flush(); card = null; deck = { id: 'd-' + slug(m[1]), title: m[1].trim(), summary: '', cards: [] }; decks.push(deck); continue; }
+    if ((m = line.match(/^### (.+)/)) && deck) { flush(); card = { id: 'q-' + slug(m[1]), q: m[1].trim(), body: [] }; deck.cards.push(card); continue; }
+    if (deck && !card && !deck.summary && (m = line.match(/^>\s*(.+)/))) { deck.summary = m[1].trim(); continue; }
+    if (card) card.body.push(line);
+  }
+  flush();
+  return decks;
+}
 const readIf = (f) => (existsSync(root + 'content/' + f) ? readFileSync(root + 'content/' + f, 'utf8') : '');
 
 const volumes = [];
@@ -159,11 +173,12 @@ for (const part of catalog.parts) {
 const algoMd = ['algorithms-a.md', 'algorithms-b.md', 'algorithms-c.md'].map(readIf).join('\n');
 const algorithms = collection(algoMd, 'a-');
 const principleCatalog = collection(readIf('principles.md'), 'p-');
+const practiceDecks = practice(readIf('practice.md'));
 
 const library = {
   title: catalog.title, subtitle: catalog.subtitle, howTo: catalog.howTo,
   parts: catalog.parts.map((p) => ({ id: p.id, title: p.title, volumes: p.volumes.map((v) => v.n) })),
-  volumes, principles: volPrinciples, principleCatalog, algorithms, probes, keyIdeas, builtAt: new Date().toISOString(),
+  volumes, principles: volPrinciples, principleCatalog, algorithms, practice: practiceDecks, probes, keyIdeas, builtAt: new Date().toISOString(),
 };
 const json = JSON.stringify(library);
 writeFileSync(root + 'app/data/library.json', json);
@@ -175,4 +190,4 @@ const sw = readFileSync(root + 'app/sw.js', 'utf8').replace(/const VERSION = '[^
 writeFileSync(root + 'app/sw.js', sw);
 
 const count = (cats) => cats.reduce((a, c) => a + c.items.length, 0);
-console.log(`library.json: ${volumes.filter((v) => v.ready).length} ready volumes, ${volPrinciples.length} volume principles, ${count(principleCatalog)} catalog principles, ${count(algorithms)} algorithms, ${probes.length} probe boxes, ${keyIdeas.length} key ideas, ${(json.length / 1024).toFixed(0)} KB; sw ${hash}`);
+console.log(`library.json: ${volumes.filter((v) => v.ready).length} ready volumes, ${volPrinciples.length} volume principles, ${count(principleCatalog)} catalog principles, ${count(algorithms)} algorithms, ${practiceDecks.reduce((a, d) => a + d.cards.length, 0)} practice cards, ${probes.length} probe boxes, ${keyIdeas.length} key ideas, ${(json.length / 1024).toFixed(0)} KB; sw ${hash}`);
