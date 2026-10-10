@@ -188,6 +188,70 @@ route(/^\/$/, async () => {
   </div>`;
 });
 
+/* ---------- Practice ---------- */
+// Flash cards: the question card sits on top; tapping it flips the answer card below.
+function practiceDecks(lib) {
+  const decks = [...(lib.practice || [])];
+  const cat = (lib.principleCatalog || []).flatMap((c) => c.items);
+  if (cat.length) decks.push({ id: 'd-principle-catalog', title: 'Principle catalog', cards: cat.map((i) => ({ id: 'q-' + i.id, q: `What does “${i.name}” say?`, a: `<p>${esc(i.summary)}</p>` })) });
+  const al = (lib.algorithms || []).flatMap((c) => c.items);
+  if (al.length) decks.push({ id: 'd-algorithm-catalog', title: 'Algorithm catalog', cards: al.map((i) => ({ id: 'q-' + i.id, q: `What is ${i.name}, and when do you use it?`, a: `<p>${esc(i.summary)}</p>` })) });
+  return decks;
+}
+let practice = null; // { deck, order, i }
+route(/^\/practice$/, async () => {
+  setTab('practice');
+  setTop('Practice', { actions: `<button class="icon-btn" data-action="pShuffle" aria-label="Shuffle">${ICON.shuffle}</button>` });
+  const lib = await library();
+  const decks = practiceDecks(lib);
+  const deckId = ls.get('pDeck', 'all');
+  const deck = decks.find((d) => d.id === deckId);
+  const pool = deck ? deck.cards : decks.flatMap((d) => d.cards);
+  const known = new Set(ls.get('pKnown', []));
+  const hide = ls.get('pHide', false);
+  if (!practice || practice.deck !== deckId || practice.hide !== hide || practice.n !== pool.length) {
+    practice = { deck: deckId, hide, n: pool.length, order: pool.filter((c) => !hide || !known.has(c.id)).map((c) => c.id), i: 0 };
+  }
+  const byId = new Map(decks.flatMap((d) => d.cards.map((c) => [c.id, { ...c, deck: d.title }])));
+  const card = byId.get(practice.order[practice.i]);
+  const nKnown = pool.filter((c) => known.has(c.id)).length;
+  view.innerHTML = `<div class="wrap practice">
+    <div class="chips">${[['all', 'All decks'], ...decks.map((d) => [d.id, d.title])].map(([id, t]) => `<button class="chip ${id === deckId ? 'on' : ''}" data-action="pDeck" data-id="${id}">${esc(t)}</button>`).join('')}</div>
+    <div class="p-meta"><span>${nKnown} of ${pool.length} known</span><span>${practice.order.length ? `${practice.i + 1} of ${practice.order.length}` : ''}</span></div>
+    <div class="bar"><div style="width:${pool.length ? Math.round(nKnown / pool.length * 100) : 0}%;background:var(--ok)"></div></div>
+    ${card ? `
+    <button class="p-q" data-action="pFlip"><span class="eyebrow">${esc(card.deck)}</span><span class="q">${esc(card.q)}</span><span class="hint">${known.has(card.id) ? '✓ Known · ' : ''}Tap to reveal</span></button>
+    <div class="p-flip" data-action="pFlip"><div class="p-inner">
+      <div class="p-face p-back"><span>Say your answer out loud, then tap the question.</span></div>
+      <div class="p-face p-front">${card.a || ''}</div>
+    </div></div>
+    <div class="p-ctl">
+      <button class="icon-btn" data-action="pStep" data-d="-1" aria-label="Previous" ${practice.i ? '' : 'disabled'}>‹</button>
+      <button class="btn again" data-action="pMark" data-k="0">Again</button>
+      <button class="btn got" data-action="pMark" data-k="1">Got it</button>
+      <button class="icon-btn" data-action="pStep" data-d="1" aria-label="Next" ${practice.i < practice.order.length - 1 ? '' : 'disabled'}>›</button>
+    </div>
+    <label class="small muted p-hide"><input type="checkbox" data-action="pHide" ${hide ? 'checked' : ''}> Hide cards I know</label>`
+    : `<div class="empty">${hide && pool.length ? 'You know every card in this deck.' : 'No cards yet.'}<br><label class="small"><input type="checkbox" data-action="pHide" ${hide ? 'checked' : ''}> Hide cards I know</label></div>`}
+  </div>`;
+  let x0 = null;
+  const area = $('.practice');
+  area.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
+  area.addEventListener('touchend', (e) => { if (x0 == null) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 70) pStep(dx < 0 ? 1 : -1); });
+});
+function pStep(d) { const n = practice.i + d; if (n >= 0 && n < practice.order.length) { practice.i = n; router(); } }
+actions.pFlip = () => $('.p-flip')?.classList.toggle('open');
+actions.pStep = (b) => pStep(+b.dataset.d);
+actions.pDeck = (b) => { ls.set('pDeck', b.dataset.id); practice = null; router(); };
+actions.pShuffle = () => { if (!practice) return; practice.order.sort(() => Math.random() - 0.5); practice.i = 0; router(); };
+actions.pHide = (b) => { ls.set('pHide', b.checked); practice = null; router(); };
+actions.pMark = (b) => {
+  const id = practice.order[practice.i]; const k = new Set(ls.get('pKnown', []));
+  if (b.dataset.k === '1') k.add(id); else k.delete(id);
+  ls.set('pKnown', [...k]);
+  if (practice.i < practice.order.length - 1) practice.i++; router();
+};
+
 /* ---------- Volume reader ---------- */
 // Each volume has the author's text and, for some, Claude's companion notes (principles, trade-offs, probes).
 const COMPANION_JUMPS = [['Principles', 'design-principles'], ['Trade-offs', 'trade-offs-and-decision-frameworks'], ['Failure modes', 'failure-modes-and-war-stories'], ['DE probes', 'what-a-de-probes'], ['Checklist', 'review-checklist']];

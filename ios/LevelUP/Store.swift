@@ -12,6 +12,9 @@ final class Store: ObservableObject {
     @Published var later: [LaterItem] = []
     @Published var refreshing = false
     @Published var lastRefresh: Date?
+    @Published var customCards: [Card] = []
+    /// Private Interview Prep content; nil in builds made without it.
+    let prep: PrepContent? = PrivateContent.load()
 
     private let dir: URL = {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("LevelUP", isDirectory: true)
@@ -29,6 +32,38 @@ final class Store: ObservableObject {
         feeds = cachedOrBundled(Feeds.self, "feeds.json")
         saved = readLocal([FeedItem].self, "saved.json") ?? []
         later = readLocal([LaterItem].self, "later.json") ?? []
+        customCards = readLocal([Card].self, "cards.json") ?? []
+    }
+
+    // MARK: Practice
+
+    /// Written decks first, then decks drawn from the principle catalog and algorithms, then your own cards.
+    var practiceDecks: [Deck] {
+        var decks = library?.practice ?? []
+        let catalog = (library?.principleCatalog ?? []).flatMap(\.items)
+        if !catalog.isEmpty {
+            decks.append(Deck(id: "d-principle-catalog", title: "Principle catalog", summary: "Name the principle's core idea.",
+                              cards: catalog.map { Card(id: "q-" + $0.id, q: "What does “\($0.name)” say?", md: $0.summary) }))
+        }
+        let algos = (library?.algorithms ?? []).flatMap(\.items)
+        if !algos.isEmpty {
+            decks.append(Deck(id: "d-algorithm-catalog", title: "Algorithm catalog", summary: "What it does and when to use it.",
+                              cards: algos.map { Card(id: "q-" + $0.id, q: "What is \($0.name), and when do you use it?", md: $0.summary) }))
+        }
+        if !customCards.isEmpty {
+            decks.append(Deck(id: "d-mine", title: "My cards", summary: "Cards you added.", cards: customCards))
+        }
+        return decks
+    }
+
+    func addCard(question: String, answer: String) {
+        customCards.insert(Card(id: "my-" + UUID().uuidString, q: question, md: answer), at: 0)
+        writeLocal(customCards, "cards.json")
+    }
+
+    func deleteCard(_ id: String) {
+        customCards.removeAll { $0.id == id }
+        writeLocal(customCards, "cards.json")
     }
 
     // MARK: Loading

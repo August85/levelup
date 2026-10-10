@@ -1,3 +1,5 @@
 LevelUP.xcodeproj/
 build/
 xcuserdata/
+# Private Interview Prep content (course chapters, books): never commit.
+Private/

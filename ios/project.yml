@@ -45,9 +45,24 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.august85.levelup
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         TARGETED_DEVICE_FAMILY: "1,2"
     dependencies:
       - target: ShareExtension
+    # Interview Prep (course chapters and books) is private: it is copied in from your Mac at build
+    # time and never committed. Without the folder the app builds fine and shows how to add it.
+    postBuildScripts:
+      - name: Bundle private Interview Prep content
+        basedOnDependencyAnalysis: false
+        script: |
+          for SRC in "${LEVELUP_PRIVATE:-}" "$SRCROOT/Private" "$HOME/Desktop/levelupfiles/LevelUP-private"; do
+            if [ -n "$SRC" ] && [ -f "$SRC/interview/index.json" ]; then
+              echo "Bundling private content from $SRC"
+              rsync -a --delete "$SRC/" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Private/"
+              exit 0
+            fi
+          done
+          echo "warning: No private Interview Prep content found; the Interview Prep tab will explain how to add it."
   ShareExtension:
     type: app-extension
     platform: iOS

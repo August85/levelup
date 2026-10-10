@@ -1,6 +1,8 @@
 # Turns the ByteByteGo course screenshots (long page captures saved as PDFs) into reflowed chapters:
-# OCR'd headings, paragraphs and bullets, with diagrams and tables cropped as images.
-# Runs on your Mac; output stays private (never committed). usage: python3 interview_prep.py RAW_DIR OUT_DIR [slug ...]
+# OCR'd headings, paragraphs and bullets, with diagrams, tables and code blocks cropped as images.
+# Runs on your Mac; the output stays private (never committed).
+# First extract page images:  for f in *.pdf; do pdfimages -j "$f" raw/<slug>/p; done
+# usage: python3 interview_prep.py RAW_DIR OUT_DIR [slug ...]
 import sys, os, glob, json, re, subprocess, tempfile, statistics, html
 from multiprocessing import Pool
 from PIL import Image
@@ -102,12 +104,16 @@ def process(args):
         l['head'] = l['h'] >= 1.25 * body and l['conf'] >= 70 and abs(l['x'] - L) < 14
         bodyish = 0.75 * body <= l['h'] <= 1.2 * body and abs(l['x'] - L) < 14 and l['conf'] >= 82
         l['text'] = leftish(l) and l['conf'] >= 72 and (wide or l['head'] or l['bullet'] or bodyish)
-        if re.match(r'^(Figure|Table)\s*\d+', l['t']):
+        l['cap'] = bool(re.match(r'^(Figure|Table)\s*\d+', l['t'])) and l['x'] > L + 60
+        # lines on a tinted background are code blocks or boxes: keep them as images
+        box = gray[l['y']:l['b'], max(0, l['x'] - 4):l['r'] + 4]
+        l['boxed'] = box.size > 0 and np.percentile(box, 90) < 251
+        if l['cap'] or l['boxed']:
             l['text'] = False; l['head'] = False
     # short last lines of paragraphs: accept when they hug an accepted line
     for _ in range(2):
         for i, l in enumerate(lines):
-            if l['text'] or not leftish(l) or l['conf'] < 72:
+            if l['text'] or l['cap'] or l['boxed'] or not leftish(l) or l['conf'] < 72:
                 continue
             prev = lines[i - 1] if i else None
             if prev and prev['text'] and l['y'] - prev['b'] < 1.2 * body:
@@ -118,12 +124,15 @@ def process(args):
     n = None
     big = [l for l in text[:4] if l['h'] >= 1.9 * body]
     for l in big:
-        m = re.match(r'^0?(\d{1,2})$', l['t'].strip())
+        m = re.match(r'^[0Oo]?(\d{1,2})$', l['t'].strip())
         if m:
             n = int(m.group(1)); l['text'] = False
     text = [l for l in text if l['text']]
     title_lines = [l for l in text[:4] if l['h'] >= 1.6 * body]
     title = ' '.join(l['t'] for l in title_lines) or slug.replace('-', ' ').title()
+    m = re.match(r'^[0Oo]?(\d{1,2})\s+(.*)$', title)
+    if m:
+        n = n or int(m.group(1)); title = m.group(2)
     for l in title_lines:
         l['text'] = False
     text = [l for l in text if l['text']]
@@ -150,7 +159,7 @@ def process(args):
                 name = f'{slug}-{figs:02d}.jpg'
                 crop.save(os.path.join(figdir, name), quality=74, optimize=True)
                 cap = ' '.join(x['t'] for x in lines if not x['text'] and y0 - 10 <= x['y'] <= y1 + 10
-                               and re.match(r'^(Figure|Table)\s*\d+', x['t']))
+                               and x.get('cap'))
                 blocks.append(('fig', name, cap))
         if l:
             blocks.append(('line', l))

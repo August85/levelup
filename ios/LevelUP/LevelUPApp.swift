@@ -33,12 +33,14 @@ struct ContentView: View {
         TabView(selection: $tab) {
             LibraryView()
                 .tabItem { Label("Library", systemImage: "books.vertical") }.tag(0)
-            SearchView()
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }.tag(1)
+            PracticeView()
+                .tabItem { Label("Practice", systemImage: "rectangle.on.rectangle.angled") }.tag(1)
+            PrepView()
+                .tabItem { Label("Interview Prep", systemImage: "briefcase") }.tag(2)
             FeedsView()
-                .tabItem { Label("AI Feeds", systemImage: "dot.radiowaves.up.forward") }.tag(2)
+                .tabItem { Label("AI Feeds", systemImage: "dot.radiowaves.up.forward") }.tag(3)
             ReadLaterView()
-                .tabItem { Label("Read Later", systemImage: "bookmark") }.tag(3)
+                .tabItem { Label("Read Later", systemImage: "bookmark") }.tag(4)
                 .badge(store.later.filter { !$0.done && !$0.read }.count)
         }
     }

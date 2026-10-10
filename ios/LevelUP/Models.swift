@@ -11,6 +11,7 @@ struct Library: Codable {
     var principles: [VolumePrinciple]
     var principleCatalog: [Category]?
     var algorithms: [Category]?
+    var practice: [Deck]?
     var probes: [Probe]?
     var keyIdeas: [KeyIdea]?
     var builtAt: String?
@@ -77,6 +78,58 @@ struct CollectionItem: Codable, Identifiable, Hashable {
     var summary: String
     var html: String
     var text: String
+}
+
+/// A practice deck of question and answer cards.
+struct Deck: Codable, Identifiable, Hashable {
+    var id: String
+    var title: String
+    var summary: String
+    var cards: [Card]
+}
+
+struct Card: Codable, Identifiable, Hashable {
+    var id: String
+    var q: String
+    /// Answer as Markdown (shown on the card) and as HTML (unused by the card, kept for the web app).
+    var md: String
+    var a: String?
+}
+
+/// Private Interview Prep content, bundled only into the owner's own builds (see ios/README.md).
+struct PrepContent: Codable {
+    var title: String
+    var source: String
+    var groups: [PrepGroup]
+    var books: [PrepBook]?
+
+    var chapters: [PrepChapter] { groups.flatMap(\.chapters) }
+}
+
+struct PrepGroup: Codable, Identifiable {
+    var title: String
+    var chapters: [PrepChapter]
+    var id: String { title }
+}
+
+struct PrepChapter: Codable, Identifiable, Hashable {
+    var slug: String
+    var n: Int
+    var title: String
+    var html: String
+    var sections: [DocSection]
+    var words: Int
+    var figures: Int
+    var id: String { slug }
+    var readMinutes: Int { max(1, words / 230) }
+}
+
+struct PrepBook: Codable, Identifiable, Hashable {
+    var file: String
+    var title: String
+    var author: String
+    var pages: Int?
+    var id: String { file }
 }
 
 struct Probe: Codable, Identifiable {

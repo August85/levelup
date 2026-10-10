@@ -1,14 +1,15 @@
 import SwiftUI
 
-/// Full-text search across volumes, companion notes, principles, algorithms, saved articles and Read Later.
-struct SearchView: View {
+/// Full-text search across volumes, companion notes, principles, algorithms, Interview Prep,
+/// practice cards, saved articles and Read Later. Shown by the Library tab while its search field is active.
+struct SearchResults: View {
     @EnvironmentObject var store: Store
-    @State private var query = ""
+    @Binding var query: String
     @State private var index: [Doc] = []
     @AppStorage("recentSearches") private var recentData: Data = Data()
 
     struct Doc: Identifiable {
-        enum Target { case volume(Int, String), item(CollectionItem, String, String), principle(Int), saved(FeedItem), later(LaterItem) }
+        enum Target { case volume(Int, String), item(CollectionItem, String, String), principle(Int), saved(FeedItem), later(LaterItem), chapter(PrepChapter, String), card(Card, String) }
         let id = UUID()
         var title: String
         var place: String
@@ -21,11 +22,10 @@ struct SearchView: View {
     private var recent: [String] { (try? JSONDecoder().decode([String].self, from: recentData)) ?? [] }
 
     var body: some View {
-        NavigationStack {
             List {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
                     if recent.isEmpty {
-                        ContentUnavailableView("Search everything", systemImage: "magnifyingglass", description: Text("Volumes, companion notes, principles, algorithms, saved articles and Read Later."))
+                        ContentUnavailableView("Search everything", systemImage: "magnifyingglass", description: Text("Volumes, companion notes, principles, algorithms, Interview Prep, practice cards, saved articles and Read Later."))
                             .listRowBackground(Color.clear)
                     } else {
                         Section("Recent") {
@@ -48,13 +48,12 @@ struct SearchView: View {
                     }
                 }
             }
-            .navigationTitle("Search")
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Raft, write skew, BBR…")
+            .listStyle(.plain)
             .onSubmit(of: .search) { remember() }
             .task(id: store.library?.builtAt) { index = buildIndex() }
             .onChange(of: store.saved.count) { _, _ in index = buildIndex() }
             .onChange(of: store.later.count) { _, _ in index = buildIndex() }
-        }
+            .onChange(of: store.customCards.count) { _, _ in index = buildIndex() }
     }
 
     private var terms: [String] { query.lowercased().split(separator: " ").map(String.init).filter { !$0.isEmpty } }
@@ -108,6 +107,10 @@ struct SearchView: View {
             ArticleView(item: f)
         case .later(let l):
             LaterReader(item: l)
+        case .chapter(let c, let anchor):
+            ChapterView(chapter: c, anchor: anchor, highlight: query)
+        case .card(let c, let deck):
+            CardDetailView(card: c, deck: deck)
         }
     }
 
@@ -125,8 +128,47 @@ struct SearchView: View {
         for p in lib.principles { add(p.name, "Principle · Vol \(p.vol)", p.html.strippingTags, .principle(p.vol)) }
         for c in lib.principleCatalog ?? [] { for i in c.items { add(i.name, "Design Principle · \(c.title)", i.summary + " " + i.text, .item(i, "Principle", c.title)) } }
         for c in lib.algorithms ?? [] { for i in c.items { add(i.name, "Algorithm · \(c.title)", i.summary + " " + i.text, .item(i, "Algorithm", c.title)) } }
+        for c in store.prep?.chapters ?? [] {
+            for s in c.sections { add(s.title, "Interview Prep · \(c.n). \(c.title)", s.text, .chapter(c, s.id)) }
+        }
+        for d in store.practiceDecks where !d.id.hasSuffix("-catalog") {
+            for c in d.cards { add(c.q, "Practice · \(d.title)", c.md, .card(c, d.title)) }
+        }
         for s in store.saved { add(s.title, "Saved · \(s.source)", (s.content ?? s.excerpt ?? "").strippingTags, .saved(s)) }
         for l in store.later { add(l.title.isEmpty ? l.url : l.title, "Read Later · \(l.host)", (l.content ?? "").strippingTags, .later(l)) }
         return docs
+    }
+}
+
+/// One practice card, opened from search.
+struct CardDetailView: View {
+    var card: Card
+    var deck: String
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(deck.uppercased()).font(.caption.weight(.semibold)).tracking(0.6).foregroundStyle(.secondary)
+                Text(card.q).font(.system(.title2, design: .serif, weight: .bold))
+                Text((try? AttributedString(markdown: card.md, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(card.md))
+                    .font(.system(.body, design: .serif))
+                    .textSelection(.enabled)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .navigationTitle("Practice card")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// Shows search results while the search field is active, otherwise the normal content.
+struct SearchSwitch<Normal: View>: View {
+    @Binding var query: String
+    @ViewBuilder var normal: () -> Normal
+    @Environment(\.isSearching) private var isSearching
+
+    var body: some View {
+        if isSearching || !query.isEmpty { SearchResults(query: $query) } else { normal() }
     }
 }

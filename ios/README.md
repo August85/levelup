@@ -8,6 +8,28 @@ keeps an offline copy of it.
 Content comes from `app/data/*.json`. A copy ships inside the app, and on launch the app fetches
 the latest from https://august85.github.io/levelup/data/ (feeds refresh there every 3 hours).
 
+## Tabs
+
+Library (with search across everything), Practice (flip cards), Interview Prep, AI Feeds, Read Later.
+
+## Interview Prep content (private)
+
+The ByteByteGo System Design Interview chapters and your books are paid or copyrighted, so they are
+never committed to this public repo. They live in `~/Desktop/levelupfiles/LevelUP-private/`
+(29 reflowed chapters with 797 diagrams, plus two PDF books) and are copied into the app when you
+build on your Mac. The build looks for that folder in this order:
+
+1. `$LEVELUP_PRIVATE` if you set it,
+2. `ios/Private/` (git-ignored; copy or symlink the folder here),
+3. `~/Desktop/levelupfiles/LevelUP-private/`.
+
+If Xcode asks for access to your Desktop folder, allow it, or copy the folder to `ios/Private/`.
+A build without the folder (such as CI) still works; the Interview Prep tab then explains how to add it.
+Keep this content out of any public App Store release.
+
+To regenerate the chapters from the screenshot PDFs, run `scripts/interview_prep.py` (needs
+`tesseract`, `pdfimages`, Pillow and numpy).
+
 ## Build on your Mac
 
 1. Install Xcode 16 or later and XcodeGen: `brew install xcodegen`
