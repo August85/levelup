@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vol 1 — Distributed Systems: A Distinguished Engineer's Working Reference</title>
+<style>
+  body{font-family:Georgia,'Times New Roman',serif;color:#1a2733;max-width:860px;margin:0 auto;padding:48px 24px;line-height:1.65}
+  h1{font-size:1.9rem;border-bottom:3px solid #0a4d8c;padding-bottom:10px}
+  h2{font-size:1.3rem;color:#0a4d8c;margin-top:44px;border-bottom:1px solid #d7dee5;padding-bottom:6px}
+  h3{font-size:1.05rem;margin-top:28px}
+  .sub{color:#5a6b7a;font-family:Verdana,Arial,sans-serif;font-size:.85rem}
+  table{border-collapse:collapse;width:100%;font-family:Verdana,Arial,sans-serif;font-size:.8rem;margin:14px 0}
+  th{text-align:left;border-bottom:2px solid #1a2733;padding:7px 9px}
+  td{border-bottom:1px solid #d7dee5;padding:7px 9px;vertical-align:top}
+  .de{background:#fdf6ec;border-left:4px solid #b7791f;padding:12px 16px;margin:18px 0}
+  .de b:first-child{color:#8a5a12}
+  .warstory{background:#f3f0fa;border-left:4px solid #5b4a8a;padding:12px 16px;margin:18px 0;font-size:.97rem}
+  .fig{margin:22px 0;text-align:center}
+  .figcap{font-family:Verdana,Arial,sans-serif;font-size:.78rem;color:#5a6b7a;margin-top:6px}
+  code{font-family:Consolas,Menlo,monospace;font-size:.88em;background:#eef1f4;padding:1px 5px;border-radius:3px}
+  ul{padding-left:22px}
+  li{margin:5px 0}
+</style>
+</head>
+<body>
+<h1>Volume 1 — Distributed Systems</h1>
+<p class="sub">A Distinguished Engineer's working reference · Part I: Systems Foundations · ~20 printed pages</p>
+
+<h2>0. The DE lens on this material</h2>
+<p>As a Principal you designed distributed systems. As a DE you will mostly <em>review</em> them, arbitrate disagreements about them, and be the person the VP asks "can this actually work?" The difference in required knowledge is subtle but real: you need less recall of API details and more command of <b>invariants, failure modes, and the boundaries of what is possible</b>. When two Principals disagree about whether a design needs consensus, you must be able to reduce the argument to first principles in front of them.</p>
+<p>This volume is therefore organized around <em>reasoning tools</em>, not technologies. Each section ends with a "What a DE probes" box — the questions that expose weak designs in review.</p>
+
+<h2>1. First principles that never expire</h2>
+
+<h3>1.1 The two hard problems</h3>
+<p>Every distributed-systems difficulty reduces to two facts: <b>(a)</b> messages between nodes can be delayed, reordered, duplicated, or lost, and <b>(b)</b> you cannot distinguish a slow node from a dead one. Everything else — consensus, leases, timeouts, retries, fencing tokens — is machinery for living with these two facts. When a design confuses you, ask which of the two facts it is fighting.</p>
+
+<h3>1.2 The end-to-end argument</h3>
+<p>Reliability guarantees provided by lower layers (TCP delivery, Kafka acks, service-mesh retries) are optimizations, not correctness. Only the endpoints of a business operation can verify that the operation actually happened. Corollary: <b>a "reliable" message bus does not remove the need for application-level idempotency and reconciliation.</b> This single principle kills about a third of the flawed designs you will review — the ones that say "Kafka guarantees delivery, so we're done."</p>
+
+<h3>1.3 CAP is a starting point; PACELC is the useful form</h3>
+<p>CAP says that during a network <b>P</b>artition you must choose between <b>C</b>onsistency and <b>A</b>vailability. It is widely misused: partitions are rare, so CAP says little about normal operation. PACELC completes it: during a <b>P</b>artition choose <b>A</b> or <b>C</b>; <b>E</b>lse (normal operation) choose between <b>L</b>atency and <b>C</b>onsistency. Most real design debates are actually EL-vs-EC debates — "do we pay a cross-region round trip on every write?" — not partition debates.</p>
+
+<table>
+<tr><th>System</th><th>Partition behavior</th><th>Normal-operation trade</th></tr>
+<tr><td>Spanner / CockroachDB</td><td>PC — minority side stops serving writes</td><td>EC — pays commit-wait / quorum latency for consistency</td></tr>
+<tr><td>DynamoDB (eventually-consistent reads)</td><td>PA — keeps serving</td><td>EL — fast reads, possibly stale</td></tr>
+<tr><td>Classic MySQL async replica</td><td>PA for reads, PC-ish for writes</td><td>EL — replica lag is the price</td></tr>
+<tr><td>ZooKeeper / etcd</td><td>PC — minority rejects</td><td>EC — linearizable, quorum on writes</td></tr>
+</table>
+
+<div class="de"><b>What a DE probes:</b> "Show me the partition behavior column for your design. If region A cannot reach region B for 10 minutes, which side serves writes, and what happens to the writes the other side rejected — or worse, accepted?" A design that has no answer has not been designed; it has been assembled.</div>
+
+<h2>2. Time, clocks, and ordering</h2>
+
+<h3>2.1 Physical clocks lie</h3>
+<p>NTP-synchronized clocks on commodity hardware drift and step; assume error bounds of milliseconds to tens of milliseconds, occasionally worse. Consequences: timestamps from different machines cannot order events that are closer together than the clock error; last-write-wins conflict resolution based on wall clocks <em>silently drops writes</em>; and leases/timeouts computed across machines need safety margins. Google's TrueTime made the error bound explicit (an interval, not a point) and Spanner literally waits out the uncertainty before commit ("commit wait") — that is what buying global external consistency costs.</p>
+
+<h3>2.2 Logical clocks: the vocabulary of "happened before"</h3>
+<ul>
+<li><b>Lamport clocks</b> — a single counter; gives a total order consistent with causality, but cannot tell you whether two events are concurrent.</li>
+<li><b>Vector clocks</b> — one counter per node; can detect concurrency (and thus conflicts), at O(n) metadata cost. This is why Dynamo-style stores return "sibling" versions for the application to merge.</li>
+<li><b>Hybrid Logical Clocks (HLC)</b> — wall-clock-shaped timestamps that also respect causality; used by CockroachDB, MongoDB, YugabyteDB. The pragmatic modern default: human-readable, bounded size, causally sound.</li>
+</ul>
+
+<div class="fig">
+<svg viewBox="0 0 720 210" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <line x1="60" y1="50" x2="690" y2="50" stroke="#1a2733" stroke-width="1.5"/>
+  <line x1="60" y1="110" x2="690" y2="110" stroke="#1a2733" stroke-width="1.5"/>
+  <line x1="60" y1="170" x2="690" y2="170" stroke="#1a2733" stroke-width="1.5"/>
+  <text x="10" y="54">Node A</text><text x="10" y="114">Node B</text><text x="10" y="174">Node C</text>
+  <circle cx="140" cy="50" r="5" fill="#0a4d8c"/><text x="120" y="34">a1 (1,0,0)</text>
+  <circle cx="300" cy="50" r="5" fill="#0a4d8c"/><text x="280" y="34">a2 (2,0,0)</text>
+  <circle cx="260" cy="110" r="5" fill="#0a4d8c"/><text x="240" y="94">b1 (2,1,0)</text>
+  <circle cx="470" cy="110" r="5" fill="#0a4d8c"/><text x="450" y="94">b2 (2,2,0)</text>
+  <circle cx="380" cy="170" r="5" fill="#b7791f"/><text x="355" y="196">c1 (0,0,1)</text>
+  <circle cx="600" cy="170" r="5" fill="#0a4d8c"/><text x="575" y="196">c2 (2,2,2)</text>
+  <line x1="300" y1="50" x2="260" y2="110" stroke="#5a6b7a" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="470" y1="110" x2="600" y2="170" stroke="#5a6b7a" stroke-width="1" marker-end="url(#arr)"/>
+  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#5a6b7a"/></marker></defs>
+  <text x="60" y="18" fill="#8a5a12">c1 is concurrent with a2 and b1 — vector clocks detect this; Lamport and wall clocks cannot.</text>
+</svg>
+<div class="figcap">Fig 1 — Vector clocks: message sends merge clocks; incomparable vectors mean concurrent events (a potential conflict to merge, not an ordering to pick).</div>
+</div>
+
+<div class="de"><b>What a DE probes:</b> "Where in this system do you compare timestamps produced by different machines, and what happens when they're wrong by 50 ms?" Any last-write-wins resolution, TTL enforcement, or cross-node lease is a place a clock bug becomes a data-loss bug.</div>
+
+<h2>3. Consensus</h2>
+
+<h3>3.1 What consensus is actually for</h3>
+<p>Consensus lets a group of unreliable machines agree on a single value (or a log of values) despite crashes and partitions. FLP impossibility says you cannot guarantee both safety and liveness in a fully asynchronous system — practical protocols keep <b>safety always</b> and accept that liveness depends on timing assumptions (a leader being elected and staying up). This asymmetry is the design ethic of the whole field: <em>never corrupt state; occasionally refuse to make progress.</em></p>
+
+<h3>3.2 The protocol landscape</h3>
+<table>
+<tr><th>Protocol</th><th>Essence</th><th>Where you meet it</th></tr>
+<tr><td>Paxos (multi-Paxos)</td><td>Two-phase quorum agreement; leader is an optimization</td><td>Chubby, Spanner internals, academic baseline</td></tr>
+<tr><td>Raft</td><td>Paxos restructured around an explicit strong leader, terms, and a replicated log — designed to be understandable and implementable</td><td>etcd, Consul, CockroachDB, TiKV, Kafka KRaft</td></tr>
+<tr><td>ZAB</td><td>Raft-like protocol predating Raft</td><td>ZooKeeper</td></tr>
+<tr><td>EPaxos / leaderless variants</td><td>Commit non-conflicting commands without a leader; better WAN latency, much harder to implement</td><td>Research; niche production use</td></tr>
+</table>
+
+<h3>3.3 Raft in one diagram</h3>
+<div class="fig">
+<svg viewBox="0 0 720 250" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <rect x="20" y="30" width="150" height="52" rx="6" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.5"/>
+  <text x="95" y="52" text-anchor="middle" font-weight="bold">Follower</text>
+  <text x="95" y="68" text-anchor="middle" font-size="9">resets timer on heartbeat</text>
+  <rect x="285" y="30" width="150" height="52" rx="6" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.5"/>
+  <text x="360" y="52" text-anchor="middle" font-weight="bold">Candidate</text>
+  <text x="360" y="68" text-anchor="middle" font-size="9">term++, requests votes</text>
+  <rect x="550" y="30" width="150" height="52" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.5"/>
+  <text x="625" y="52" text-anchor="middle" font-weight="bold">Leader</text>
+  <text x="625" y="68" text-anchor="middle" font-size="9">sends heartbeats + log entries</text>
+  <line x1="170" y1="48" x2="285" y2="48" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a2)"/>
+  <text x="227" y="40" text-anchor="middle" font-size="9">election timeout</text>
+  <line x1="435" y1="48" x2="550" y2="48" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a2)"/>
+  <text x="492" y="40" text-anchor="middle" font-size="9">majority of votes</text>
+  <path d="M360,82 C360,130 130,130 100,84" fill="none" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#a2)"/>
+  <text x="235" y="128" text-anchor="middle" font-size="9">sees higher term / new leader</text>
+  <path d="M620,82 C610,150 180,155 100,88" fill="none" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#a2)"/>
+  <text x="380" y="163" text-anchor="middle" font-size="9">discovers higher term → steps down</text>
+  <rect x="20" y="185" width="680" height="52" rx="6" fill="#f6f8fa" stroke="#8a97a3"/>
+  <text x="32" y="205" font-size="10" font-weight="bold">Safety invariants:</text>
+  <text x="32" y="222" font-size="10">one leader per term · a vote requires the candidate's log to be at least as up-to-date · entries commit only when replicated to a majority in the leader's own term</text>
+  <defs><marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 2 — Raft roles and transitions. Everything reduces to: terms are a logical clock; majorities overlap; the log is truth.</div>
+</div>
+
+<h3>3.4 DE-level judgment on consensus</h3>
+<ul>
+<li><b>Consensus is expensive and precious — use it narrowly.</b> The mature pattern is consensus for <em>metadata and coordination</em> (who is leader, shard maps, configuration, locks) and cheaper replication for bulk data. Kafka uses KRaft for the controller quorum, not for every message.</li>
+<li><b>Never let teams build their own.</b> A homegrown "simple leader election" using Redis SETNX or a DB row is where split-brain incidents come from. The review question: "what fences a deposed leader that doesn't know it was deposed?" (See fencing tokens, §4.4.)</li>
+<li><b>Quorum size is a latency/availability dial.</b> 3 nodes tolerate 1 failure; 5 tolerate 2 but every commit waits for 3 acks. Cross-region quorums put a speed-of-light floor under write latency — this is a PACELC EL/EC decision made physical.</li>
+<li><b>Reads need care too.</b> A "read from the leader" is only linearizable if the leader confirms it is still leader (lease-based reads or read-index), otherwise a deposed leader serves stale data confidently.</li>
+</ul>
+
+<div class="warstory"><b>Pattern to recognize:</b> a team runs a 3-node etcd/ZooKeeper for coordination, then colocates it with a chatty workload. Disk latency spikes → heartbeats miss → leader elections churn → every dependent service's "coordination" flaps. Consensus clusters need isolated, low-latency disks and their own capacity story. Half of all "ZooKeeper is flaky" complaints are actually "we starved ZooKeeper's fsync."</div>
+
+<h2>4. Replication</h2>
+
+<h3>4.1 The three families</h3>
+<table>
+<tr><th>Model</th><th>Mechanics</th><th>Strengths</th><th>Sharp edges</th></tr>
+<tr><td>Single-leader</td><td>All writes to one node; followers apply the log (sync or async)</td><td>Simple mental model; read scaling; no write conflicts</td><td>Failover is the hard part: lost async writes, split brain, replication lag anomalies</td></tr>
+<tr><td>Multi-leader</td><td>Writes accepted in several places (multi-region, offline clients); conflicts resolved after the fact</td><td>Local write latency; region survivability</td><td>Conflict resolution is an application problem; LWW silently loses data</td></tr>
+<tr><td>Leaderless (quorum)</td><td>Client (or coordinator) writes to W replicas, reads from R; W+R&gt;N gives overlap</td><td>No failover pause; tunable latency/durability</td><td>Overlap ≠ linearizability (sloppy quorums, concurrent writes); needs read repair + anti-entropy</td></tr>
+</table>
+
+<h3>4.2 Quorum overlap, and what it does not buy</h3>
+<div class="fig">
+<svg viewBox="0 0 720 170" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <g>
+    <circle cx="120" cy="80" r="16" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.5"/><text x="120" y="84" text-anchor="middle">N1</text>
+    <circle cx="200" cy="80" r="16" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.5"/><text x="200" y="84" text-anchor="middle">N2</text>
+    <circle cx="280" cy="80" r="16" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.5"/><text x="280" y="84" text-anchor="middle">N3</text>
+    <circle cx="360" cy="80" r="16" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.5"/><text x="360" y="84" text-anchor="middle">N4</text>
+    <circle cx="440" cy="80" r="16" fill="#f6f8fa" stroke="#8a97a3" stroke-width="1.5"/><text x="440" y="84" text-anchor="middle">N5</text>
+    <rect x="95" y="52" width="210" height="56" rx="28" fill="none" stroke="#0a6b3d" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <text x="110" y="42" fill="#0a6b3d">Write quorum W=3</text>
+    <rect x="255" y="52" width="210" height="56" rx="28" fill="none" stroke="#0a4d8c" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <text x="345" y="132" fill="#0a4d8c">Read quorum R=3</text>
+  </g>
+  <text x="510" y="60" font-size="10">N=5, W=3, R=3 → every read</text>
+  <text x="510" y="76" font-size="10">quorum intersects every write</text>
+  <text x="510" y="92" font-size="10">quorum (here at N3).</text>
+  <text x="510" y="118" font-size="10" fill="#8a5a12">But overlap alone doesn't order</text>
+  <text x="510" y="134" font-size="10" fill="#8a5a12">concurrent writes → siblings/LWW.</text>
+</svg>
+<div class="figcap">Fig 3 — W+R&gt;N guarantees the read sees some replica with the latest acknowledged write — it does not by itself give linearizability or conflict-freedom.</div>
+</div>
+
+<h3>4.3 Replication lag anomalies (the interview-question trio, seen in production weekly)</h3>
+<ul>
+<li><b>Read-your-writes violation:</b> user updates profile, refresh hits a lagging replica, edit "disappears." Fixes: session stickiness to leader for a window, timestamp/LSN tokens ("read at least up to X"), or read-from-leader for the writing user.</li>
+<li><b>Monotonic reads violation:</b> successive reads hit replicas with different lag; time appears to go backwards. Fix: pin a session to one replica or carry a watermark.</li>
+<li><b>Causal violation:</b> answer replicates before question. Fix: causal consistency (rare natively) or design so dependent reads carry the causal token.</li>
+</ul>
+
+<h3>4.4 Fencing tokens — the pattern that saves failovers</h3>
+<p>Any lease/lock/leader design must answer: what if the old holder is paused (GC, VM migration, network blip), the lease expires, a new holder proceeds, and then <em>the old one wakes up and keeps writing?</em> The answer is a monotonically increasing token issued with the lease, and downstream systems that <b>reject writes bearing an older token</b>. Without the reject step, the token is decoration. This is also why "we'll just use a distributed lock" is not a complete sentence in an architecture review.</p>
+
+<div class="de"><b>What a DE probes:</b> "Walk me through failover, second by second. Which writes were acknowledged but not replicated? Who decides the new leader — and what stops the old one from writing? What does the client library do during the gap?" The quality of a replication design lives entirely in its failover story.</div>
+
+<h2>5. Partitioning (sharding)</h2>
+
+<h3>5.1 Hash vs range — the eternal trade</h3>
+<table>
+<tr><th></th><th>Hash partitioning</th><th>Range partitioning</th></tr>
+<tr><td>Load distribution</td><td>Uniform by construction</td><td>Prone to hot ranges (recent timestamps, popular prefixes)</td></tr>
+<tr><td>Range scans</td><td>Impossible without scatter-gather</td><td>Natural and cheap</td></tr>
+<tr><td>Rebalancing</td><td>Consistent hashing / fixed virtual partitions</td><td>Split/merge ranges dynamically (HBase, CockroachDB, Spanner)</td></tr>
+<tr><td>Failure of imagination</td><td>Hot <em>keys</em> still exist (one celebrity, one big tenant)</td><td>Monotonic keys turn the newest range into a write hot spot</td></tr>
+</table>
+
+<h3>5.2 Consistent hashing and virtual nodes</h3>
+<div class="fig">
+<svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <circle cx="150" cy="110" r="80" fill="none" stroke="#1a2733" stroke-width="1.5"/>
+  <circle cx="150" cy="30" r="9" fill="#0a4d8c"/><text x="150" y="14" text-anchor="middle">A1</text>
+  <circle cx="219" cy="70" r="9" fill="#0a6b3d"/><text x="238" y="66">B1</text>
+  <circle cx="219" cy="150" r="9" fill="#b7791f"/><text x="238" y="160">C1</text>
+  <circle cx="150" cy="190" r="9" fill="#0a4d8c"/><text x="150" y="212" text-anchor="middle">A2</text>
+  <circle cx="81" cy="150" r="9" fill="#0a6b3d"/><text x="52" y="160">B2</text>
+  <circle cx="81" cy="70" r="9" fill="#b7791f"/><text x="52" y="66">C2</text>
+  <circle cx="196" cy="45" r="4" fill="#c0392b"/><text x="205" y="38" fill="#c0392b">key k</text>
+  <path d="M199,49 A78,78 0 0 1 216,63" fill="none" stroke="#c0392b" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="330" y="55" font-size="10.5">Each physical node owns many small arcs (virtual nodes).</text>
+  <text x="330" y="75" font-size="10.5">Key k walks clockwise to the next token → node B.</text>
+  <text x="330" y="105" font-size="10.5" font-weight="bold">Why vnodes matter:</text>
+  <text x="330" y="123" font-size="10.5">· adding/removing a node moves only ~1/N of keys</text>
+  <text x="330" y="141" font-size="10.5">· load and rebalance work spread across all nodes</text>
+  <text x="330" y="159" font-size="10.5">· heterogeneous hardware → assign proportional vnodes</text>
+  <text x="330" y="187" font-size="10.5" fill="#8a5a12">Modern alternative: fixed partition count (e.g., 4096 slots)</text>
+  <text x="330" y="203" font-size="10.5" fill="#8a5a12">mapped to nodes by a control plane — simpler to reason about.</text>
+  <defs><marker id="a3" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#c0392b"/></marker></defs>
+</svg>
+<div class="figcap">Fig 4 — Consistent hashing with virtual nodes. Kafka, Redis Cluster, and DynamoDB all use the "many fixed partitions, remap ownership" variant.</div>
+</div>
+
+<h3>5.3 The problems that survive good partitioning</h3>
+<ul>
+<li><b>Hot keys.</b> One tenant/SKU/celebrity exceeding a partition's capacity. Mitigations: key salting (split the key, aggregate on read), request coalescing, dedicated caching tier for the head of the distribution. Retail traffic is brutally Zipfian — a DE at Walmart scale should assume the top 0.1% of keys dominate and ask every sharded design for its hot-key plan.</li>
+<li><b>Cross-shard operations.</b> Secondary indexes become scatter-gather or must be materialized per-partition; transactions across shards need 2PC or saga-style decomposition (Volume 2 covers both). The best mitigation is upstream: choose the partition key so that the dominant transaction touches one shard.</li>
+<li><b>Resharding as a live operation.</b> Doubling partitions on a stateful system under load is a project, not a config change. Probe: "what is your resharding runbook, and when did you last exercise it?"</li>
+</ul>
+
+<h2>6. Consistency models — a spectrum, not a binary</h2>
+
+<div class="fig">
+<svg viewBox="0 0 720 150" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <line x1="40" y1="70" x2="690" y2="70" stroke="#1a2733" stroke-width="2" marker-end="url(#a4)"/>
+  <g text-anchor="middle">
+    <circle cx="80" cy="70" r="6" fill="#0a6b3d"/><text x="80" y="50">Linearizable</text><text x="80" y="100" font-size="9">single copy,</text><text x="80" y="112" font-size="9">real-time order</text>
+    <circle cx="230" cy="70" r="6" fill="#0a6b3d"/><text x="230" y="50">Sequential</text><text x="230" y="100" font-size="9">one global order,</text><text x="230" y="112" font-size="9">not real-time</text>
+    <circle cx="380" cy="70" r="6" fill="#b7791f"/><text x="380" y="50">Causal</text><text x="380" y="100" font-size="9">respects</text><text x="380" y="112" font-size="9">happens-before</text>
+    <circle cx="520" cy="70" r="6" fill="#b7791f"/><text x="520" y="50">Session guarantees</text><text x="520" y="100" font-size="9">RYW, monotonic</text><text x="520" y="112" font-size="9">reads/writes</text>
+    <circle cx="645" cy="70" r="6" fill="#c0392b"/><text x="645" y="50">Eventual</text><text x="645" y="100" font-size="9">convergence,</text><text x="645" y="112" font-size="9">no order promise</text>
+  </g>
+  <text x="40" y="26" font-size="10">← stronger: simpler application code, higher latency/coordination cost</text>
+  <text x="690" y="140" text-anchor="end" font-size="10">weaker: cheaper and faster, complexity pushed into the application →</text>
+  <defs><marker id="a4" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 5 — The consistency spectrum. The engineering move is matching each data flow to the weakest model its invariant tolerates.</div>
+</div>
+
+<p>Three DE-level observations that cut through most consistency debates:</p>
+<ul>
+<li><b>Consistency is per-invariant, not per-system.</b> "Inventory can't go negative" needs coordination on the decrement path; "product description is current" tolerates seconds of staleness. Systems that pick one model globally either overpay everywhere or corrupt something somewhere.</li>
+<li><b>Session guarantees are the sweet spot for user-facing flows.</b> Users don't observe global consistency; they observe <em>their own session</em>. Read-your-writes + monotonic reads make an eventually-consistent backend feel consistent to each user at a fraction of linearizability's cost.</li>
+<li><b>CRDTs solve convergence, not invariants.</b> Conflict-free replicated data types guarantee replicas merge to the same value without coordination — great for counters, sets, presence, collaborative editing. They cannot enforce global constraints ("at most one," "non-negative"): those need consensus somewhere, however small.</li>
+</ul>
+
+<h2>7. A taxonomy of failure</h2>
+<p>Junior engineers design for crash-stop. Production delivers stranger things. The DE's job in review is to name the failure classes the design silently assumes away:</p>
+
+<table>
+<tr><th>Failure class</th><th>What it looks like</th><th>Design counter</th></tr>
+<tr><td>Crash-stop</td><td>Node dies cleanly</td><td>Replication, restart, health checks — the easy case</td></tr>
+<tr><td>Gray failure / fail-slow</td><td>Node is "up" but degraded: 1 bad NIC, 99th-percentile disk, one flaky AZ link. Health checks pass; customers suffer</td><td>Differential observability (compare the node's self-view vs peers' view of it), outlier ejection in LBs, latency-based health, not just liveness</td></tr>
+<tr><td>Partial network partition</td><td>A can reach C, B cannot; asymmetric routes</td><td>Consensus-based membership rather than gossip alone; design for "disagreeing views of who is alive"</td></tr>
+<tr><td>Byzantine-ish corruption</td><td>Bit flips, buggy node serializing garbage, wrong-but-confident responses</td><td>Checksums end-to-end, request/response validation, canary comparison</td></tr>
+<tr><td>Metastable failure</td><td>System is stable, a trigger (deploy, spike, GC pause) tips it into a bad equilibrium that persists after the trigger ends — usually retry- or cache-driven</td><td>See §9; load shedding, retry budgets, cache priming discipline</td></tr>
+<tr><td>Cascading failure</td><td>One component's failure overloads the next (thundering herd onto the survivors)</td><td>Bulkheads, circuit breakers, per-dependency quotas, graceful degradation</td></tr>
+</table>
+
+<div class="warstory"><b>Metastable failure, canonical shape:</b> cache cluster restarts → hit rate drops from 98% to 0 → database receives 50× load → DB latency explodes → requests time out → clients retry → load doubles again → even after the cache is warm, the retry storm sustains the overload. The trigger is gone; the failure persists. The fix was never "bigger DB" — it is bounded retries with budgets, request hedging discipline, and shedding load at the front door until hit rate recovers. Every large system has this failure mode latent in it; the review question is "what breaks the feedback loop?"</div>
+
+<h2>8. Idempotency and delivery semantics</h2>
+
+<h3>8.1 The only honest delivery guarantee</h3>
+<p>Between two processes over a network, you can have <b>at-most-once</b> (send, don't retry — may lose) or <b>at-least-once</b> (retry until acked — may duplicate). "Exactly-once delivery" does not exist; what exists is <b>exactly-once <em>processing effect</em></b>: at-least-once delivery combined with deduplication or idempotent application. Kafka's "exactly-once" (idempotent producer + transactional read-process-write) is precisely this, scoped to Kafka-to-Kafka pipelines — the moment a side effect leaves that boundary (an email, a payment call), the end-to-end argument applies again and you need your own idempotency.</p>
+
+<h3>8.2 The idempotency toolkit</h3>
+<ul>
+<li><b>Idempotency keys:</b> client generates a unique key per logical operation; server stores key → result and replays the stored result on retry. The subtleties reviews miss: key scope (per operation, not per request), storage TTL vs retry window, and what happens when the first attempt is still <em>in flight</em> when the retry arrives (need a lock or "in-progress" state, or you double-execute).</li>
+<li><b>Natural idempotency:</b> design mutations as absolute state ("set quantity to 7") rather than relative deltas ("decrement by 1") where the domain allows.</li>
+<li><b>Conditional writes:</b> compare-and-set with a version number — the database enforces "apply only if unchanged," turning duplicates into no-ops.</li>
+<li><b>The transactional outbox:</b> the answer to "how do I update my database AND publish an event atomically" — see Fig 6. The dual-write anti-pattern (write DB, then publish to Kafka as two separate acts) is the single most common correctness bug in event-driven architectures; some fraction of one of the two always fails.</li>
+</ul>
+
+<div class="fig">
+<svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <rect x="20" y="40" width="120" height="44" rx="6" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.5"/>
+  <text x="80" y="66" text-anchor="middle">Service</text>
+  <rect x="230" y="20" width="200" height="110" rx="6" fill="#f6f8fa" stroke="#1a2733" stroke-width="1.5"/>
+  <text x="330" y="40" text-anchor="middle" font-weight="bold">Database (one ACID txn)</text>
+  <rect x="250" y="52" width="160" height="30" rx="4" fill="#ffffff" stroke="#5a6b7a"/>
+  <text x="330" y="71" text-anchor="middle" font-size="10">business tables: UPDATE order…</text>
+  <rect x="250" y="90" width="160" height="30" rx="4" fill="#fdf6ec" stroke="#b7791f"/>
+  <text x="330" y="109" text-anchor="middle" font-size="10">outbox table: INSERT event row</text>
+  <rect x="230" y="165" width="200" height="44" rx="6" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.5"/>
+  <text x="330" y="185" text-anchor="middle">Relay (poller or CDC/</text>
+  <text x="330" y="200" text-anchor="middle">Debezium on the WAL)</text>
+  <rect x="550" y="165" width="150" height="44" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.5"/>
+  <text x="625" y="192" text-anchor="middle">Kafka topic</text>
+  <line x1="140" y1="62" x2="230" y2="62" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="185" y="54" text-anchor="middle" font-size="9">1. commit</text>
+  <line x1="330" y1="130" x2="330" y2="165" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="345" y="152" font-size="9">2. read committed rows</text>
+  <line x1="430" y1="187" x2="550" y2="187" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="490" y="179" text-anchor="middle" font-size="9">3. publish (at-least-once)</text>
+  <text x="470" y="228" font-size="9.5" fill="#8a5a12">Consumers still deduplicate by event ID — the outbox fixes atomicity, not duplicates.</text>
+  <defs><marker id="a5" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 6 — Transactional outbox. State change and event creation share one transaction; the relay makes publishing reliable; consumers make it idempotent.</div>
+</div>
+
+<div class="de"><b>What a DE probes:</b> "Point to every place a request can be retried — client SDK, gateway, mesh, application, consumer. Now point to the one place that deduplicates. If there are five retry layers and zero dedup layers, this system double-charges someone eventually." Also: "What is the idempotency story for the <em>human</em> retry — the user who clicks Submit twice, the operator who reruns the job?"</div>
+
+<h2>9. Backpressure and overload</h2>
+
+<h3>9.1 The core law</h3>
+<p>Every system has a capacity. When offered load exceeds it, the only choices are: <b>queue</b> (borrow time — latency grows, and unbounded queues turn overload into memory exhaustion plus doomed work), <b>shed</b> (reject cheaply and early), or <b>degrade</b> (serve a cheaper answer). A system with none of these chosen explicitly has chosen "collapse" implicitly. Goodput — completed-within-deadline work — is the metric; a system at 100% utilization retrying timed-out requests can have near-zero goodput while looking "busy."</p>
+
+<h3>9.2 The mechanisms and their composition</h3>
+<ul>
+<li><b>Bounded queues everywhere.</b> Queue length is your earliest overload signal and your latency budget made physical (Little's Law: L = λW — a queue of 500 at 100 req/s <em>is</em> 5 seconds of latency, whatever your code intends).</li>
+<li><b>Admission control / load shedding at the edge:</b> reject before doing expensive work; prioritize by request class (checkout &gt; browse; paid &gt; batch). Rejecting 10% of traffic cheaply beats serving 100% at 10× latency, because timeouts turn "slow success" into "expensive failure."</li>
+<li><b>Retry discipline:</b> exponential backoff <em>with jitter</em> (decorrelates the herd), retry <b>budgets</b> (e.g., retries ≤ 10% of request volume, globally), and retry only where idempotent. Retries amplify load exactly when the system can least afford it: three layers each retrying 3× is a 27× multiplier on a struggling dependency.</li>
+<li><b>Circuit breakers + bulkheads:</b> stop calling a failing dependency (fail fast, probe periodically); isolate resource pools per dependency so one slow downstream can't consume every thread.</li>
+<li><b>Explicit flow-control protocols:</b> TCP windows, HTTP/2 stream windows, gRPC flow control, Reactive Streams demand signals, Kafka's consumer-driven pull (pull-based consumption is intrinsic backpressure — a major, underappreciated reason event-driven architectures survive spikes).</li>
+<li><b>Deadline propagation:</b> the caller's remaining budget travels with the request; a service with 50 ms left doesn't launch a 200 ms subquery. Without this, the leaves of a call tree do work whose results the root already abandoned.</li>
+</ul>
+
+<div class="fig">
+<svg viewBox="0 0 720 170" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="11">
+  <rect x="20" y="55" width="110" height="44" rx="6" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.5"/><text x="75" y="82" text-anchor="middle">Clients</text>
+  <rect x="185" y="55" width="130" height="44" rx="6" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.5"/><text x="250" y="75" text-anchor="middle">Edge: admission</text><text x="250" y="90" text-anchor="middle">control + priorities</text>
+  <rect x="370" y="55" width="130" height="44" rx="6" fill="#f6f8fa" stroke="#1a2733" stroke-width="1.5"/><text x="435" y="75" text-anchor="middle">Service: bounded</text><text x="435" y="90" text-anchor="middle">queues + deadlines</text>
+  <rect x="555" y="55" width="145" height="44" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.5"/><text x="627" y="75" text-anchor="middle">Dependency: breaker</text><text x="627" y="90" text-anchor="middle">+ bulkhead + budget</text>
+  <line x1="130" y1="77" x2="185" y2="77" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a6)"/>
+  <line x1="315" y1="77" x2="370" y2="77" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a6)"/>
+  <line x1="500" y1="77" x2="555" y2="77" stroke="#1a2733" stroke-width="1.3" marker-end="url(#a6)"/>
+  <path d="M627,99 C627,140 250,140 250,99" fill="none" stroke="#c0392b" stroke-width="1.3" stroke-dasharray="5,3" marker-end="url(#a7)"/>
+  <text x="437" y="150" text-anchor="middle" fill="#c0392b" font-size="10">pressure signal flows backwards: slow down / shed at the cheapest point</text>
+  <text x="250" y="40" text-anchor="middle" font-size="9.5" fill="#8a5a12">shed HERE, not after the expensive work</text>
+  <defs>
+    <marker id="a6" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker>
+    <marker id="a7" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#c0392b"/></marker>
+  </defs>
+</svg>
+<div class="figcap">Fig 7 — Backpressure composition. Work flows right; pressure must flow left. Every hop without a bound is a place overload hides until it explodes.</div>
+</div>
+
+<div class="de"><b>What a DE probes:</b> "What happens at 2× design load? Show me the specific line of code or config that says no." And the follow-up that separates real designs from hopeful ones: "When you shed, what do you shed <em>first</em>, and does the business agree with that ordering?" Load-shedding priority is a product decision wearing an engineering costume — surfacing that is exactly the DE's job.</div>
+
+<h2>10. The DE review checklist for any distributed design</h2>
+<ol style="font-family:Verdana,Arial,sans-serif;font-size:.86rem;line-height:1.9">
+<li><b>Invariants:</b> What must never be violated, and which single component enforces each one?</li>
+<li><b>Partition column:</b> During a network partition, which side serves what, and how does the system reconcile?</li>
+<li><b>Failover script:</b> Second-by-second story: acknowledged-but-unreplicated writes, leader fencing, client behavior in the gap.</li>
+<li><b>Clock dependence:</b> Every cross-machine timestamp comparison, lease, and TTL — with the wrong-by-50ms consequence stated.</li>
+<li><b>Retry × dedup map:</b> Every layer that retries; the one layer that deduplicates; the human-retry story.</li>
+<li><b>Dual writes:</b> Any place two systems are updated without an outbox/CDC/transaction is a bug with a delivery date.</li>
+<li><b>Overload plan:</b> The bound, the shed, the degrade — with the code pointer, and the business sign-off on shedding order.</li>
+<li><b>Gray-failure detection:</b> How is a slow-but-alive node detected and ejected? (Liveness checks alone = not detected.)</li>
+<li><b>Hot-key plan:</b> Top 0.1% of keys — measured, and handled how?</li>
+<li><b>Blast radius:</b> What is the largest thing that fails together (cell? region? shared control plane?), and is that acceptable?</li>
+</ol>
+
+<h2>11. Canonical reading (deep, worth the hours)</h2>
+<ul>
+<li><i>Designing Data-Intensive Applications</i> — Kleppmann. Still the spine of the field; read chapters 5–9 twice.</li>
+<li>Raft paper ("In Search of an Understandable Consensus Algorithm") — Ongaro &amp; Ousterhout. Readable in one sitting.</li>
+<li>"Metastable Failures in Distributed Systems" (HotOS '21) and Amazon Builders' Library: "Timeouts, retries and backoff with jitter," "Using load shedding to avoid overload," "Avoiding fallback in distributed systems."</li>
+<li>"Gray Failure: The Achilles' Heel of Cloud-Scale Systems" (Microsoft Research).</li>
+<li>Jepsen analyses (jepsen.io) — the habit of reading them builds the reviewer's instinct for how systems actually violate their claims.</li>
+</ul>
+
+<h2>12. Chapter summary — ten sentences to retain</h2>
+<ol style="line-height:1.9">
+<li>You cannot distinguish slow from dead; every mechanism is a coping strategy for that.</li>
+<li>Lower-layer reliability never removes end-to-end idempotency and reconciliation.</li>
+<li>PACELC, not CAP: most trade-offs are latency-vs-consistency in normal operation.</li>
+<li>Wall clocks order nothing across machines; use HLC/logical clocks, and fear LWW.</li>
+<li>Consensus keeps safety always, liveness usually — use it narrowly, never homegrown.</li>
+<li>Replication quality is failover quality; demand the second-by-second story and a fencing token.</li>
+<li>Consistency is chosen per-invariant; session guarantees are the user-facing sweet spot.</li>
+<li>Design for gray, partial, and metastable failures — crash-stop is the easy case.</li>
+<li>Exactly-once is at-least-once plus dedup; the outbox pattern kills dual writes.</li>
+<li>Bound every queue, budget every retry, shed early by business priority, propagate deadlines.</li>
+</ol>
+
+<p class="sub" style="margin-top:36px">Next volume: Databases — storage engines, MVCC, isolation anomalies, distributed transactions, and what a DE probes in a schema review.</p>
+</body>
+</html>

@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vol 2 — Database Internals and Distributed Databases: A Working Reference</title>
+<style>
+  body{font-family:Georgia,'Times New Roman',serif;color:#1a2733;max-width:860px;margin:0 auto;padding:48px 24px;line-height:1.65}
+  h1{font-size:1.9rem;border-bottom:3px solid #0a4d8c;padding-bottom:10px}
+  h2{font-size:1.3rem;color:#0a4d8c;margin-top:44px;border-bottom:1px solid #d7dee5;padding-bottom:6px}
+  h3{font-size:1.05rem;margin-top:28px}
+  .sub{color:#5a6b7a;font-family:Verdana,Arial,sans-serif;font-size:.85rem}
+  table{border-collapse:collapse;width:100%;font-family:Verdana,Arial,sans-serif;font-size:.8rem;margin:14px 0}
+  th{text-align:left;border-bottom:2px solid #1a2733;padding:7px 9px}
+  td{border-bottom:1px solid #d7dee5;padding:7px 9px;vertical-align:top}
+  .de{background:#fdf6ec;border-left:4px solid #b7791f;padding:12px 16px;margin:18px 0}
+  .de b:first-child{color:#8a5a12}
+  .warstory{background:#f3f0fa;border-left:4px solid #5b4a8a;padding:12px 16px;margin:18px 0;font-size:.97rem}
+  .fig{margin:22px 0;text-align:center}
+  .figcap{font-family:Verdana,Arial,sans-serif;font-size:.78rem;color:#5a6b7a;margin-top:6px}
+  code{font-family:Consolas,Menlo,monospace;font-size:.88em;background:#eef1f4;padding:1px 5px;border-radius:3px}
+  ul{padding-left:22px}
+  li{margin:5px 0}
+</style>
+</head>
+<body>
+<h1>Volume 2 — Database Internals and Distributed Databases</h1>
+<p class="sub">Part I: Systems Foundations · ~22 printed pages · Companion to Volume 1 (Distributed Systems)</p>
+
+<h2>0. Scope and reading model</h2>
+<p>This volume covers the machinery underneath a database — storage engines, logging, MVCC, isolation, query planning — and then the distributed layer built on top of it: replication topologies, distributed transactions, sharding, and the modern distributed-SQL designs. The organizing idea throughout: <b>a database is a carefully arranged set of trade-offs between write amplification, read amplification, and space amplification, wrapped in a concurrency-control protocol and a recovery protocol.</b> Nearly every design decision in every engine can be located on those axes. "Architecture review questions" boxes collect the questions that expose weak designs and weak schema choices, phrased so they can be used verbatim in a design review.</p>
+
+<h2>1. Storage engines: B-trees and LSM-trees</h2>
+
+<h3>1.1 The two lineages</h3>
+<p>Almost every serious storage engine descends from one of two structures. <b>B+-trees</b> (InnoDB, Postgres heap+B-tree indexes, SQL Server, Oracle) update pages <em>in place</em>: a balanced tree of fixed-size pages (commonly 8–16 KB), where reads walk root→leaf in 3–4 hops and writes modify the target page. <b>LSM-trees</b> (RocksDB, Cassandra, HBase, LevelDB, and therefore CockroachDB, TiDB, YugabyteDB, Kafka Streams state stores) never update in place: writes go to an in-memory <em>memtable</em>, which is flushed to immutable sorted files (SSTables); background <em>compaction</em> merges files and discards overwritten values.</p>
+
+<div class="fig">
+<svg viewBox="0 0 720 265" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <!-- B-tree side -->
+  <text x="170" y="20" text-anchor="middle" font-weight="bold" font-size="12">B+-tree (update in place)</text>
+  <rect x="120" y="32" width="100" height="26" rx="4" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/><text x="170" y="49" text-anchor="middle">root page</text>
+  <rect x="40" y="86" width="84" height="26" rx="4" fill="#eef4fa" stroke="#0a4d8c"/><text x="82" y="103" text-anchor="middle">internal</text>
+  <rect x="216" y="86" width="84" height="26" rx="4" fill="#eef4fa" stroke="#0a4d8c"/><text x="258" y="103" text-anchor="middle">internal</text>
+  <rect x="14" y="140" width="70" height="26" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="49" y="157" text-anchor="middle">leaf</text>
+  <rect x="94" y="140" width="70" height="26" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="129" y="157" text-anchor="middle">leaf</text>
+  <rect x="186" y="140" width="70" height="26" rx="4" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.6"/><text x="221" y="157" text-anchor="middle">leaf ✎</text>
+  <rect x="266" y="140" width="70" height="26" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="301" y="157" text-anchor="middle">leaf</text>
+  <line x1="150" y1="58" x2="90" y2="86" stroke="#5a6b7a"/><line x1="190" y1="58" x2="250" y2="86" stroke="#5a6b7a"/>
+  <line x1="66" y1="112" x2="49" y2="140" stroke="#5a6b7a"/><line x1="98" y1="112" x2="129" y2="140" stroke="#5a6b7a"/>
+  <line x1="242" y1="112" x2="221" y2="140" stroke="#5a6b7a"/><line x1="274" y1="112" x2="301" y2="140" stroke="#5a6b7a"/>
+  <text x="170" y="196" text-anchor="middle" font-size="9.5">write = read-modify-write of the page (random I/O),</text>
+  <text x="170" y="210" text-anchor="middle" font-size="9.5">page splits keep the tree balanced</text>
+  <!-- LSM side -->
+  <text x="545" y="20" text-anchor="middle" font-weight="bold" font-size="12">LSM-tree (append + compact)</text>
+  <rect x="470" y="32" width="150" height="26" rx="4" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="545" y="49" text-anchor="middle">memtable (RAM, sorted)</text>
+  <rect x="470" y="76" width="150" height="22" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="545" y="91" text-anchor="middle">L0: SSTable · SSTable</text>
+  <rect x="450" y="108" width="190" height="22" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="545" y="123" text-anchor="middle">L1: sorted, non-overlapping</text>
+  <rect x="425" y="140" width="240" height="22" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="545" y="155" text-anchor="middle">L2: ~10× larger</text>
+  <line x1="545" y1="58" x2="545" y2="76" stroke="#0a6b3d" stroke-width="1.4" marker-end="url(#b1)"/>
+  <text x="618" y="70" font-size="9">flush (sequential)</text>
+  <line x1="545" y1="98" x2="545" y2="108" stroke="#b7791f" stroke-width="1.4" marker-end="url(#b1)"/>
+  <line x1="545" y1="130" x2="545" y2="140" stroke="#b7791f" stroke-width="1.4" marker-end="url(#b1)"/>
+  <text x="655" y="128" font-size="9" fill="#8a5a12">compaction</text>
+  <text x="545" y="196" text-anchor="middle" font-size="9.5">write = append (sequential I/O); read may probe several levels</text>
+  <text x="545" y="210" text-anchor="middle" font-size="9.5">(bloom filters skip most SSTables)</text>
+  <text x="360" y="245" text-anchor="middle" font-size="10" fill="#8a5a12">B-tree: pay at write time, reads cheap · LSM: writes cheap, pay at read + compaction time</text>
+  <defs><marker id="b1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 1 — The two storage lineages. Every "why is this database fast/slow at X" question starts here.</div>
+</div>
+
+<h3>1.2 The amplification triangle</h3>
+<table>
+<tr><th></th><th>Write amplification</th><th>Read amplification</th><th>Space amplification</th></tr>
+<tr><td>B+-tree</td><td>Moderate-high: a 100-byte row dirties a whole page; plus WAL, plus (InnoDB) doublewrite buffer</td><td>Low and predictable: O(log n) page reads, excellent for point and range reads</td><td>Moderate: pages run ~70% full; fragmentation over time</td></tr>
+<tr><td>LSM, leveled compaction</td><td>High: each byte is rewritten once per level (~10× over the tree's life)</td><td>Low-moderate: one sorted run per level + bloom filters</td><td>Low: overwritten data compacted away promptly</td></tr>
+<tr><td>LSM, tiered/size-tiered</td><td>Lower: fewer rewrites</td><td>Higher: many overlapping runs to check</td><td>Higher: duplicates live longer (can transiently double)</td></tr>
+</table>
+<p>This triangle is why write-heavy event/metrics workloads gravitate to LSM engines, why read-latency-critical OLTP with modest write rates stays happy on B-trees, and why compaction tuning (leveled vs tiered vs hybrid) is the central operational knob of every LSM store. Compaction also explains the characteristic LSM pathology: <b>compaction debt</b> — sustained write bursts outrun background merging, read amplification climbs, then compaction competes with foreground traffic for disk bandwidth exactly when the system is busiest. Mature deployments rate-limit compaction, watch pending-compaction bytes as a first-class saturation signal, and treat "L0 file count rising" as an early-warning alert.</p>
+
+<h3>1.3 Secondary structure notes worth knowing</h3>
+<ul>
+<li><b>Clustered vs heap storage.</b> InnoDB clusters rows by primary key (table <em>is</em> the PK B-tree; secondary indexes store the PK, so long PKs bloat every index, and random UUIDs as PKs scatter inserts across the tree). Postgres stores rows in an unordered heap with all indexes pointing at physical row locations — which is why non-HOT updates must touch every index on the table.</li>
+<li><b>Bloom filters</b> give LSM reads a fast "definitely not in this file" check (~1% false positives at ~10 bits/key). They do not help range scans — one reason range-heavy workloads size LSM levels differently.</li>
+<li><b>Modern hybrids:</b> Bw-trees (Hekaton lineage), fractal/B<sup>ε</sup>-trees (buffered writes inside a B-tree), and WiscKey-style key-value separation (keys in the LSM, large values in a log) each move along the amplification triangle rather than escaping it.</li>
+</ul>
+
+<h2>2. Durability: WAL, checkpoints, and what "committed" means</h2>
+
+<h3>2.1 Write-ahead logging</h3>
+<p>The write-ahead log is the single most important structure in a database. Rule: <b>the log record describing a change reaches durable storage before the change itself does, and a transaction is committed when its commit record is durably in the log</b> — not when data pages are written. Data pages can then be flushed lazily; crash recovery replays the log (redo) and rolls back losers (undo). The canonical algorithm is ARIES: fuzzy checkpoints, physiological logging, log sequence numbers (LSNs) stamped on every page, and repeat-history-then-undo recovery. Three practical consequences:</p>
+<ul>
+<li><b>Group commit</b> amortizes the expensive fsync across concurrent transactions — the reason a database can commit tens of thousands of transactions per second on a disk that does only a few thousand fsyncs per second. Settings like Postgres <code>commit_delay</code> or MySQL <code>binlog_group_commit_sync_delay</code> tune this batching.</li>
+<li><b>Durability is configurable, and quietly.</b> Postgres <code>synchronous_commit=off</code>, MySQL <code>innodb_flush_log_at_trx_commit=2</code>, Redis <code>appendfsync everysec</code>, Kafka <code>acks=1</code> — all trade a window of acknowledged-but-losable writes for latency. Disks and virtualized storage add their own volatile caches beneath the database's fsync. A durability claim is only as strong as the weakest layer's flush semantics.</li>
+<li><b>Checkpoints bound recovery time.</b> Infrequent checkpoints → long log replay after a crash; aggressive checkpoints → I/O spikes during operation (checkpoint "storms" were a classic Postgres tuning problem before spread checkpoints). Recovery-time objective is thus partly a checkpoint-cadence decision.</li>
+</ul>
+
+<h3>2.2 The log is also the integration surface</h3>
+<p>The WAL's second life: replication ships it (physical or logical), and change-data-capture systems (Debezium reading MySQL binlog / Postgres logical decoding) turn it into an event stream. "The database's log is the database" is the conceptual bridge between OLTP systems and streaming architecture (Volume 11): a table is a view over a change stream, and a change stream is derivable from a table. Systems that grasp this get exactly-once-ish pipelines via the outbox/CDC pattern; systems that don't do dual writes.</p>
+
+<div class="de"><b>Architecture review questions:</b> "What is the durability setting on every store in the write path, including the disk cache layer beneath it — and does the acknowledged-write-loss window match what the business believes?" · "What is the measured crash-recovery time at current WAL volume, and when was it last tested with a real kill?" · "Is anything reading table state and separately publishing events (dual write), where CDC on the log would be atomic?"</div>
+
+<h2>3. MVCC: reading without blocking</h2>
+
+<h3>3.1 The idea</h3>
+<p>Multi-version concurrency control keeps multiple versions of each row so that <b>readers never block writers and writers never block readers</b>. Each transaction gets a snapshot — a consistent view as of its start (or per-statement) — defined by transaction IDs or timestamps; row versions carry visibility metadata; a version is visible if it was committed before the snapshot and not deleted before it. All mainstream engines are MVCC engines; they differ in where old versions live:</p>
+
+<table>
+<tr><th>Engine</th><th>Old versions live…</th><th>Consequence</th></tr>
+<tr><td>PostgreSQL</td><td>In the table heap itself (a new physical row per update; old row marked dead)</td><td>Needs VACUUM to reclaim dead tuples and freeze transaction IDs; update-heavy tables bloat; index entries multiply unless the update is HOT (same page, no indexed column changed)</td></tr>
+<tr><td>MySQL/InnoDB, Oracle</td><td>Newest version in place; prior versions reconstructed from undo logs/segments</td><td>Long-running transactions pin undo history: purge lags, snapshot reconstruction slows (Oracle's classic "snapshot too old")</td></tr>
+<tr><td>LSM-based distributed SQL (CockroachDB, TiDB, Yugabyte)</td><td>As timestamped keys in the LSM</td><td>Garbage collection is a compaction concern; MVCC timestamps double as the distributed-consistency mechanism</td></tr>
+</table>
+
+<div class="fig">
+<svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <text x="20" y="24" font-weight="bold">Version chain for row id=42</text>
+  <rect x="20" y="40" width="190" height="52" rx="6" fill="#ffffff" stroke="#8a97a3" stroke-width="1.4"/>
+  <text x="115" y="60" text-anchor="middle">v1: balance=100</text>
+  <text x="115" y="78" text-anchor="middle" font-size="9">created txn 50 · deleted txn 88</text>
+  <rect x="265" y="40" width="190" height="52" rx="6" fill="#ffffff" stroke="#8a97a3" stroke-width="1.4"/>
+  <text x="360" y="60" text-anchor="middle">v2: balance=70</text>
+  <text x="360" y="78" text-anchor="middle" font-size="9">created txn 88 · deleted txn 95</text>
+  <rect x="510" y="40" width="190" height="52" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.6"/>
+  <text x="605" y="60" text-anchor="middle">v3: balance=90</text>
+  <text x="605" y="78" text-anchor="middle" font-size="9">created txn 95 · live</text>
+  <line x1="210" y1="66" x2="265" y2="66" stroke="#1a2733" stroke-width="1.3" marker-end="url(#c1)"/>
+  <line x1="455" y1="66" x2="510" y2="66" stroke="#1a2733" stroke-width="1.3" marker-end="url(#c1)"/>
+  <rect x="20" y="120" width="680" height="62" rx="6" fill="#f6f8fa" stroke="#8a97a3"/>
+  <text x="32" y="140" font-size="10">Reader with snapshot at txn 90 sees <tspan font-weight="bold">v2</tspan> (created ≤90, deleted &gt;90) — regardless of concurrent writers.</text>
+  <text x="32" y="158" font-size="10">A transaction open since txn 49 forces v1 to be kept alive everywhere behind it.</text>
+  <text x="32" y="174" font-size="10" fill="#8a5a12">Hence the operational law: long-running transactions are a system-wide cost, not a local one.</text>
+  <defs><marker id="c1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 2 — MVCC version chains and snapshot visibility. Garbage collection can only reclaim versions older than the oldest active snapshot.</div>
+</div>
+
+<div class="warstory"><b>Recurring production pattern:</b> an analytics query, an idle-in-transaction connection from a leaked application session, or a stuck replication slot holds a snapshot open for hours. Version cleanup stalls behind it (VACUUM can't reclaim / undo purge lags), tables and indexes bloat, plans degrade, and in Postgres's worst case transaction-ID wraparound pressure forces emergency autovacuum. The visible symptom ("database slow, disk growing") appears far from the cause (one old snapshot). Monitoring the age of the oldest transaction/snapshot is as fundamental as monitoring disk space.</div>
+
+<h2>4. Isolation levels: the anomaly catalogue</h2>
+
+<h3>4.1 Levels defined by what they permit</h3>
+<table>
+<tr><th>Level</th><th>Dirty read</th><th>Non-repeatable read</th><th>Phantom</th><th>Lost update</th><th>Write skew</th></tr>
+<tr><td>Read uncommitted</td><td>possible</td><td>possible</td><td>possible</td><td>possible</td><td>possible</td></tr>
+<tr><td>Read committed</td><td>—</td><td>possible</td><td>possible</td><td>possible</td><td>possible</td></tr>
+<tr><td>Repeatable read (ANSI)</td><td>—</td><td>—</td><td>possible</td><td>varies</td><td>possible</td></tr>
+<tr><td>Snapshot isolation (SI)</td><td>—</td><td>—</td><td>mostly —</td><td>— (first-committer-wins)</td><td><b>possible</b></td></tr>
+<tr><td>Serializable</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+</table>
+
+<p>Key facts that the ANSI table above obscures:</p>
+<ul>
+<li><b>Defaults are weak.</b> Postgres, Oracle, and SQL Server default to read committed; MySQL/InnoDB defaults to repeatable read (implemented as snapshot reads plus gap locks for locking reads). Most applications therefore run with lost-update and write-skew exposure unless they add explicit locking or version checks.</li>
+<li><b>"Repeatable read" is not one thing.</b> Postgres's REPEATABLE READ is true snapshot isolation. InnoDB's is snapshot reads for plain SELECTs but current-read semantics for <code>SELECT … FOR UPDATE</code>/DML — a mix that surprises people porting code between them.</li>
+<li><b>Write skew is the anomaly worth memorizing</b>, because snapshot isolation permits it and it maps to real invariants: two transactions each read an overlapping predicate, each writes a <em>different</em> row, both commit, and a constraint spanning the rows breaks. Classic instances: two doctors both going off-call because each saw "≥2 on call"; double-booking; balance checks across two accounts. No single row was written twice, so first-committer-wins never fires.</li>
+</ul>
+
+<div class="fig">
+<svg viewBox="0 0 720 205" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <text x="20" y="22" font-weight="bold">Write skew under snapshot isolation — invariant: at least one doctor on call</text>
+  <line x1="120" y1="45" x2="120" y2="185" stroke="#0a4d8c" stroke-width="1.6"/><text x="120" y="38" text-anchor="middle" fill="#0a4d8c">Txn A (Alice)</text>
+  <line x1="600" y1="45" x2="600" y2="185" stroke="#0a6b3d" stroke-width="1.6"/><text x="600" y="38" text-anchor="middle" fill="#0a6b3d">Txn B (Bob)</text>
+  <rect x="140" y="52" width="200" height="24" rx="4" fill="#eef4fa" stroke="#0a4d8c"/><text x="240" y="68" text-anchor="middle" font-size="9.5">read: on_call count = 2 ✓</text>
+  <rect x="380" y="52" width="200" height="24" rx="4" fill="#eaf6ef" stroke="#0a6b3d"/><text x="480" y="68" text-anchor="middle" font-size="9.5">read: on_call count = 2 ✓</text>
+  <rect x="140" y="92" width="200" height="24" rx="4" fill="#eef4fa" stroke="#0a4d8c"/><text x="240" y="108" text-anchor="middle" font-size="9.5">UPDATE alice SET on_call=false</text>
+  <rect x="380" y="92" width="200" height="24" rx="4" fill="#eaf6ef" stroke="#0a6b3d"/><text x="480" y="108" text-anchor="middle" font-size="9.5">UPDATE bob SET on_call=false</text>
+  <rect x="140" y="132" width="200" height="24" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="240" y="148" text-anchor="middle" font-size="9.5">commit ✓ (no write conflict)</text>
+  <rect x="380" y="132" width="200" height="24" rx="4" fill="#ffffff" stroke="#5a6b7a"/><text x="480" y="148" text-anchor="middle" font-size="9.5">commit ✓ (different row!)</text>
+  <text x="360" y="185" text-anchor="middle" fill="#c0392b" font-size="10.5">Result: zero doctors on call. Disjoint writes, overlapping read predicates — SI cannot see it.</text>
+</svg>
+<div class="figcap">Fig 3 — Write skew. Fixes: SERIALIZABLE, or materialize the conflict (lock a row both must write, e.g. <code>SELECT … FOR UPDATE</code> on the roster row, or a constraint the database can check).</div>
+</div>
+
+<h3>4.2 How serializability is actually enforced</h3>
+<ul>
+<li><b>Two-phase locking (2PL):</b> acquire shared/exclusive locks, hold to commit. Correct, and the historical default; costs blocking, deadlocks (detected and broken by aborting a victim), and read/write interference. Predicate/gap locks close phantoms.</li>
+<li><b>Serializable Snapshot Isolation (SSI):</b> run optimistically on snapshots, track read-write dependency edges, abort a transaction when a dangerous cycle pattern appears (Postgres SERIALIZABLE). Non-blocking reads, occasional spurious aborts — applications must retry serialization failures, a requirement often discovered in production rather than design.</li>
+<li><b>Optimistic concurrency control (OCC):</b> execute, then validate read/write sets at commit; retry on conflict. Wins under low contention; collapses under high contention (retry storms). FoundationDB and many internet-scale stores use OCC variants.</li>
+<li><b>Deterministic execution (Calvin/FaunaDB lineage):</b> globally order transactions first, then execute without further coordination — removes 2PC from the commit path at the cost of requiring known read/write sets up front.</li>
+</ul>
+
+<div class="de"><b>Architecture review questions:</b> "Which isolation level does each critical transaction actually run at — the configured default, not the assumed one?" · "For every invariant spanning more than one row (limits, uniqueness enforced in code, balance rules): what prevents write skew — serializable isolation, an explicit lock, or a database-checked constraint?" · "Does the data-access layer retry serialization failures and deadlock victims, with bounded attempts?" · "Any read-modify-write done as read-then-UPDATE without a version check is a lost update waiting for concurrency — where are they?"</div>
+
+<h2>5. Indexing and query optimization</h2>
+
+<h3>5.1 Index mechanics that drive design decisions</h3>
+<ul>
+<li><b>Composite index order is a prefix rule.</b> An index on <code>(tenant_id, created_at, status)</code> serves predicates on <code>tenant_id</code>, on <code>tenant_id+created_at</code>, and range-plus-prefix combinations — but not on <code>status</code> alone. The design heuristic: equality columns first, then the range column, then columns needed only for output.</li>
+<li><b>Covering indexes</b> (all needed columns in the index, via key columns or INCLUDE) let the engine skip the table entirely — often the single biggest win for hot read paths, paid for in write amplification and storage.</li>
+<li><b>Every index is a tax on every write.</b> An insert into a table with 8 secondary indexes performs 9 structure modifications; in Postgres, any update touching an indexed column defeats HOT and touches all indexes. Index sprawl is the slow-motion failure of maturing schemas; unused-index audits (e.g. <code>pg_stat_user_indexes</code>) belong in operational hygiene.</li>
+<li><b>Selectivity decides usefulness.</b> An index on a boolean or low-cardinality status column rarely helps alone (the optimizer will prefer a scan past ~5–10% selectivity) — but a <em>partial</em> index (<code>WHERE status='pending'</code>) on the rare hot value can be spectacular.</li>
+<li><b>Random UUID primary keys</b> scatter inserts across the tree (cache-hostile, page splits, bloated secondary indexes in clustered engines). Time-ordered identifiers (UUIDv7, ULID, Snowflake IDs) restore locality while keeping distribution-friendly generation — at the cost of concentrating inserts on the rightmost pages, which range-sharded distributed stores then need to split around (§8).</li>
+</ul>
+
+<h3>5.2 The cost-based optimizer: powerful, statistical, and therefore fragile</h3>
+<p>A modern optimizer parses to a logical plan, enumerates physically equivalent plans (join orders, join algorithms, index choices), estimates each plan's cost from <b>table statistics</b> (row counts, histograms, distinct-value estimates), and executes the cheapest. Three join algorithms cover almost everything: <b>nested loop</b> (best when the outer side is small and the inner side has an index), <b>hash join</b> (build a hash table on the smaller side; the default for large unsorted joins), <b>merge join</b> (both sides sorted; shines when indexes provide order). The systemic weaknesses worth internalizing:</p>
+<ul>
+<li><b>Estimates compound multiplicatively.</b> Correlated predicates (<code>city='Bentonville' AND state='AR'</code>) are assumed independent; each join multiplies estimation error; a 6-table join can be off by orders of magnitude, at which point plan choice is effectively random. Extended/multi-column statistics exist precisely for this.</li>
+<li><b>Stale statistics after bulk loads</b> are the classic morning-after incident: last night's load doubled a table, autoanalyze hasn't run, the optimizer still plans for the old size, and a nested loop executes 50 million times.</li>
+<li><b>Parameter sensitivity ("parameter sniffing"):</b> a plan cached for a common parameter value is catastrophic for a skewed one (tenant with 10 rows vs tenant with 100M). Mitigations: per-value plans, plan guides/hints, or recompiling hot statements.</li>
+<li><b>Plan flips are a change-management category.</b> A minor version upgrade, a statistics refresh, or crossing a size threshold can flip a stable plan to a bad one overnight. Mature operations pin or baseline plans for the top revenue-path queries and diff plans before/after upgrades — treating query plans as artifacts to manage, like dependencies.</li>
+</ul>
+
+<div class="de"><b>Architecture review questions:</b> "For the ten most critical queries: what is the plan, what keeps it stable, and what alerts if it flips?" · "Which predicates are correlated, and do extended statistics cover them?" · "What is the write cost of the index set — and which indexes have zero reads in the last 90 days?" · "Is pagination OFFSET-based (O(n) per page, drifts under writes) where keyset/seek pagination should be used?"</div>
+
+<h2>6. Distributed transactions</h2>
+
+<h3>6.1 Two-phase commit: the protocol and its price</h3>
+<div class="fig">
+<svg viewBox="0 0 720 215" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <line x1="110" y1="40" x2="110" y2="190" stroke="#0a4d8c" stroke-width="1.6"/><text x="110" y="30" text-anchor="middle" fill="#0a4d8c">Coordinator</text>
+  <line x1="400" y1="40" x2="400" y2="190" stroke="#1a2733" stroke-width="1.4"/><text x="400" y="30" text-anchor="middle">Participant 1</text>
+  <line x1="620" y1="40" x2="620" y2="190" stroke="#1a2733" stroke-width="1.4"/><text x="620" y="30" text-anchor="middle">Participant 2</text>
+  <line x1="110" y1="60" x2="400" y2="60" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#d1)"/>
+  <line x1="110" y1="60" x2="620" y2="72" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#d1)"/>
+  <text x="240" y="52" font-size="9.5">PREPARE (participants force-write prepared record, hold locks)</text>
+  <line x1="400" y1="90" x2="110" y2="100" stroke="#0a6b3d" stroke-width="1.2" marker-end="url(#d1)"/>
+  <line x1="620" y1="90" x2="110" y2="108" stroke="#0a6b3d" stroke-width="1.2" marker-end="url(#d1)"/>
+  <text x="300" y="86" font-size="9.5" fill="#0a6b3d">YES votes (a yes is a binding promise)</text>
+  <rect x="40" y="118" width="140" height="20" rx="4" fill="#fdf6ec" stroke="#b7791f"/><text x="110" y="132" text-anchor="middle" font-size="9">force-write COMMIT — the decision point</text>
+  <line x1="110" y1="150" x2="400" y2="150" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#d1)"/>
+  <line x1="110" y1="150" x2="620" y2="162" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#d1)"/>
+  <text x="240" y="144" font-size="9.5">COMMIT (participants apply, release locks, ack)</text>
+  <text x="360" y="200" text-anchor="middle" fill="#c0392b" font-size="10">If the coordinator dies between the decision and the notifications, prepared participants block, holding locks, until it returns.</text>
+  <defs><marker id="d1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#5a6b7a"/></marker></defs>
+</svg>
+<div class="figcap">Fig 4 — 2PC. Atomic, but a blocking protocol with a single point of failure at the coordinator, two round trips, and lock hold time spanning both.</div>
+</div>
+<p>2PC's problems in practice: prepared-but-undecided participants hold locks indefinitely if the coordinator is lost (heuristic manual resolution is the escape hatch, and it breaks atomicity); latency couples to the slowest participant; and abort rates climb with participant count. Modern systems respond three ways: <b>make the coordinator highly available</b> (Spanner runs 2PC over Paxos groups, so "coordinator" is itself a replicated state machine — the blocking problem dissolves, the latency remains), <b>avoid crossing shards</b> (choose partition keys so the dominant transactions are single-shard), or <b>replace the transaction with a saga</b>.</p>
+
+<h3>6.2 Sagas: transactions decomposed, atomicity traded for availability</h3>
+<p>A saga is a sequence of local transactions, each with a <b>compensating action</b>; on failure, completed steps are compensated in reverse (reserve inventory → charge payment → create shipment; if payment fails, release the reservation). Two coordination styles: <b>orchestration</b> (a state machine drives steps — debuggable, one place to see progress; the mainstream choice at scale, via workflow engines such as Temporal or step-function services) and <b>choreography</b> (each service reacts to events — no central coordinator, but the workflow exists only implicitly, and reasoning about partial failure across six services becomes archaeology). The non-negotiables sagas impose: intermediate states are <em>visible</em> (another service can observe reserved-but-unpaid inventory — the design must make such states meaningful, e.g. reservations with TTLs, not hidden), compensations can themselves fail (need retries + idempotency + a dead-letter escalation path), and some steps are not compensatable (an email sent, a payment captured at certain processors) — those must be ordered last or designed as reversible business operations (refunds) rather than technical rollbacks.</p>
+
+<h3>6.3 Percolator-style commit: distributed transactions over a KV store</h3>
+<p>The other widely deployed lineage (Google Percolator; TiDB today): snapshot-isolated transactions built on a versioned KV store using per-row locks, a designated <b>primary lock</b> as the atomic commit point, and timestamps from a central oracle. Commit = write the primary's commit record; all secondaries then reference it. Readers finding a stale lock resolve it by checking the primary — the protocol is crash-recoverable by construction. Worth knowing because it demonstrates the general trick behind most modern distributed transactions: <b>reduce multi-key atomicity to single-key atomicity plus indirection.</b></p>
+
+<h2>7. Distributed SQL: the modern synthesis</h2>
+<p>Spanner, CockroachDB, TiDB, and YugabyteDB share one architecture, worth holding as a template: data split into <b>ranges/regions</b> (~64–512 MB), each range a <b>Raft/Paxos group</b> replicated across zones; transactions layered as MVCC + 2PC <em>over</em> those replicated groups (so participant failure doesn't block — the group fails over); timestamps from TrueTime (Spanner), HLC (CockroachDB), or a timestamp oracle (TiDB); SQL planned atop the distributed KV layer. The costs are equally shared: every write pays quorum latency (cross-region topologies put the speed of light in the commit path — geo-partitioning and leaseholder placement exist to keep quorums near writers); hot ranges need automatic splitting (sequential keys again); and clock-uncertainty handling (commit-wait vs read-restarts) is the tax for consistency without perfectly synchronized clocks.</p>
+
+<div class="de"><b>Architecture review questions:</b> "Which transactions cross shard/range boundaries, at what percentage of traffic — and could the partition key make them single-shard?" · "For each saga: the compensation table (step → compensating action → what if it fails), the visibility of intermediate states, and the non-compensatable steps ordered last." · "In the multi-region topology: where are quorum members and leaseholders for each table, and what is the write latency from each region's users?"</div>
+
+<h2>8. Sharding relational systems in practice</h2>
+<p>Volume 1 covered partitioning theory (hash vs range, consistent hashing, hot keys); this section adds what changes when the thing being sharded is a relational database with an application already attached.</p>
+<ul>
+<li><b>The shard key decision is the whole game.</b> It must (a) appear in the dominant queries, (b) distribute load, and (c) keep the dominant transactions single-shard. Multi-tenant systems shard by tenant almost by default — then need a plan for the whale tenant that outgrows a shard (tenant-level split, or promotion to a dedicated shard).</li>
+<li><b>Proxy-based sharding (Vitess lineage)</b> keeps MySQL/Postgres underneath and puts routing, query rewriting, and resharding workflows in a middle tier. Cross-shard queries become scatter-gather with restrictions; global secondary indexes become lookup tables maintained (approximately atomically) by the proxy layer. Coprocessor-style alternatives (Citus) push the same ideas into a Postgres extension.</li>
+<li><b>Resharding is a data-movement workflow, not a config change:</b> copy the historical data, tail the source's change stream to catch up, verify checksums, hold a brief write fence, cut over routing, keep reverse replication for rollback. The same choreography — bulk copy + CDC catch-up + verified cutover — is also exactly how large zero-downtime migrations between databases are done, which is why it deserves rehearsal as a standing capability rather than a one-off heroic project.</li>
+<li><b>What is silently given up:</b> cross-shard foreign keys and uniqueness (application- or lookup-table-enforced now), cross-shard joins (denormalize, or move the query to the analytics stack), auto-increment IDs (replaced by time-ordered distributed IDs), and single-database transactions for any flow crossing shards (back to §6).</li>
+</ul>
+
+<h2>9. Choosing an engine: a decision map</h2>
+<table>
+<tr><th>Workload shape</th><th>First-choice families</th><th>The trade being made</th></tr>
+<tr><td>OLTP, relational integrity, single region</td><td>PostgreSQL / MySQL, read replicas, connection pooler in front</td><td>Vertical + read scaling first; sharding deferred until forced — correctly so</td></tr>
+<tr><td>OLTP, must survive region loss with strong consistency</td><td>Distributed SQL (Spanner/CockroachDB class)</td><td>Quorum write latency; operational novelty; cost</td></tr>
+<tr><td>Extreme write throughput, flexible consistency, known access paths</td><td>Cassandra/Scylla, DynamoDB</td><td>Query-first data modeling; denormalization; eventual consistency handled in the application</td></tr>
+<tr><td>Key-value with microsecond reads</td><td>Redis/Valkey (cache or store), embedded RocksDB</td><td>Durability configuration is the entire risk conversation</td></tr>
+<tr><td>Analytics over large history</td><td>Columnar warehouse / lakehouse (Volume 11)</td><td>Not a transactional system; feed it via CDC, don't point dashboards at OLTP</td></tr>
+<tr><td>Time series / metrics</td><td>Purpose-built TSDB or columnar + time partitioning</td><td>Retention/downsampling as first-class design</td></tr>
+<tr><td>Search / relevance</td><td>Lucene family (Elasticsearch/OpenSearch)</td><td>A derived index fed by CDC — never the system of record</td></tr>
+<tr><td>Graph traversal as the dominant query</td><td>Native graph store — only if traversal depth genuinely dominates</td><td>Most "graph" needs are two joins in disguise</td></tr>
+</table>
+<p>Two meta-rules encode most organizational wisdom on this subject. <b>First: default to boring.</b> A well-run Postgres/MySQL with replicas, a pooler (OLTP connection counts kill databases before data volume does), and disciplined schema management covers a remarkable fraction of workloads; specialized engines are justified by a measured workload property, not by a diagram's elegance. <b>Second: one system of record per fact; everything else is a derived view.</b> Caches, search indexes, warehouses, and feature stores should be rebuildable from the system of record plus its change stream — the moment two stores can each claim to be the truth, reconciliation debt begins.</p>
+
+<h2>10. Operating databases: the topics that decide production outcomes</h2>
+<ul>
+<li><b>Online schema change.</b> Naive <code>ALTER TABLE</code> on a large hot table can lock or rewrite for hours. The safe patterns: instant/metadata-only DDL where the engine supports it; ghost-table tools (gh-ost, pt-osc) or logical-replication-based changes elsewhere; and the universal choreography for anything semantic — <em>expand → dual-write/backfill → verify → contract</em> — with each phase a separately deployable, separately revertible step. Adding a NOT NULL column with a default, adding an index, and changing a column type each have engine-specific traps worth a checklist.</li>
+<li><b>Backups are a restore capability, not a cron job.</b> The measures that matter: restore time at current data volume (measured, recently), point-in-time recovery window (base backup + WAL archive), and whether backups would survive the same failure as the primary (region, account, ransomware — hence offline/immutable copies). Untested backups are a rumor.</li>
+<li><b>Replication lag as a product parameter.</b> Async replica lag bounds how stale read-replica traffic can be and how much data a failover can lose (RPO). Semi-sync/quorum acking trades write latency for a smaller loss window. This is a business decision expressed in database configuration, and it should be written down as one.</li>
+<li><b>Connection architecture.</b> Per-connection overhead (Postgres: a process each) means microservice fleets exhaust databases with idle connections; poolers (PgBouncer class) in transaction mode are effectively mandatory at scale, with their own caveats (session state, prepared statements).</li>
+<li><b>Capacity signals worth alerting on before user pain:</b> oldest-snapshot age (§3), replication lag, checkpoint/compaction backlog, connection saturation, lock waits, plan flips on top queries, and — for LSM systems — L0 file count and pending compaction bytes.</li>
+</ul>
+
+<h2>11. Architecture review checklist — databases</h2>
+<ol style="font-family:Verdana,Arial,sans-serif;font-size:.86rem;line-height:1.9">
+<li><b>System of record:</b> one per fact; every other copy derived and rebuildable via the change stream.</li>
+<li><b>Durability chain:</b> commit setting → fsync → disk cache → replication ack, stated end-to-end, with the acknowledged-loss window the business signed.</li>
+<li><b>Isolation vs invariants:</b> each multi-row invariant mapped to its enforcement (serializable / lock / constraint); read-modify-writes carry version checks; serialization failures retried.</li>
+<li><b>Snapshot hygiene:</b> alerts on long-running transactions, idle-in-transaction sessions, stale replication slots.</li>
+<li><b>Plan stability:</b> top queries have known plans, statistics coverage for correlated predicates, and flip detection.</li>
+<li><b>Index budget:</b> every index justified by a read path; unused indexes audited; write amplification accounted.</li>
+<li><b>Shard key:</b> dominant transactions single-shard; whale-key plan; resharding runbook exercised.</li>
+<li><b>Cross-shard flows:</b> 2PC scope minimized; sagas have compensation tables and non-compensatable steps last.</li>
+<li><b>Schema change:</b> expand/backfill/contract discipline; large-table DDL patterns chosen per engine.</li>
+<li><b>Restore reality:</b> measured restore time, PITR window, failure-isolated backup copies, last successful restore drill dated.</li>
+</ol>
+
+<h2>12. Canonical reading</h2>
+<ul>
+<li><i>Designing Data-Intensive Applications</i> — Kleppmann, ch. 3 (storage), 7 (transactions), 9 (consistency) — the database chapters reward a second pass after this volume.</li>
+<li><i>Database Internals</i> — Alex Petrov. The best single book on storage engines and distributed database machinery.</li>
+<li>"A Critique of ANSI SQL Isolation Levels" (Berenson et al.) — where the real anomaly taxonomy, including write skew, comes from.</li>
+<li>"Large-scale Incremental Processing Using Distributed Transactions" (Percolator) and "Spanner: Google's Globally-Distributed Database."</li>
+<li>ARIES paper (Mohan et al.) — skim for the recovery invariants; the details built every commercial engine.</li>
+<li><i>Use The Index, Luke</i> (use-the-index-luke.com) — the most practical treatment of indexing and pagination in print.</li>
+<li>Jepsen analyses of Postgres, CockroachDB, and MongoDB — isolation claims vs measured behavior.</li>
+</ul>
+
+<h2>13. Chapter summary — ten sentences to retain</h2>
+<ol style="line-height:1.9">
+<li>Every storage engine is a position on the write/read/space amplification triangle; B-trees pay at write time, LSMs at read-and-compaction time.</li>
+<li>Committed means "commit record durably in the WAL" — and durability is a configurable chain whose weakest link (often a disk cache or an async setting) defines the real loss window.</li>
+<li>The WAL is also the integration surface: CDC on the log replaces dual writes.</li>
+<li>MVCC means readers and writers don't block — and that one long-lived snapshot silently poisons cleanup system-wide.</li>
+<li>Defaults are weak: read committed / repeatable read permit lost updates and write skew, which map to real broken invariants, not textbook curiosities.</li>
+<li>Serializability comes from 2PL, SSI, or OCC — the latter two require applications that retry aborts.</li>
+<li>The optimizer is statistical: correlated predicates, stale statistics, and parameter skew make plan management an operational discipline, not a tuning afterthought.</li>
+<li>2PC blocks on coordinator loss; modern systems replicate the coordinator (Spanner-class), avoid crossing shards, or decompose into sagas with real compensation design.</li>
+<li>Distributed SQL = ranges × Raft × MVCC × 2PC-over-groups, paying quorum latency and hot-range management for regional survivability.</li>
+<li>Boring first, one system of record per fact, and backups measured by restore drills — most database strategy is these three sentences enforced.</li>
+</ol>
+
+<p class="sub" style="margin-top:36px">Next: Volume 9 (Security Architecture) or Volume 3 (Networking), per the priority order.</p>
+</body>
+</html>

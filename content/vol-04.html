@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vol 4 — Cloud &amp; Infrastructure: A Working Reference</title>
+<style>
+  body{font-family:Georgia,'Times New Roman',serif;color:#1a2733;max-width:860px;margin:0 auto;padding:48px 24px;line-height:1.65}
+  h1{font-size:1.9rem;border-bottom:3px solid #0a4d8c;padding-bottom:10px}
+  h2{font-size:1.3rem;color:#0a4d8c;margin-top:44px;border-bottom:1px solid #d7dee5;padding-bottom:6px}
+  h3{font-size:1.05rem;margin-top:28px}
+  .sub{color:#5a6b7a;font-family:Verdana,Arial,sans-serif;font-size:.85rem}
+  table{border-collapse:collapse;width:100%;font-family:Verdana,Arial,sans-serif;font-size:.8rem;margin:14px 0}
+  th{text-align:left;border-bottom:2px solid #1a2733;padding:7px 9px}
+  td{border-bottom:1px solid #d7dee5;padding:7px 9px;vertical-align:top}
+  .de{background:#fdf6ec;border-left:4px solid #b7791f;padding:12px 16px;margin:18px 0}
+  .de b:first-child{color:#8a5a12}
+  .warstory{background:#f3f0fa;border-left:4px solid #5b4a8a;padding:12px 16px;margin:18px 0;font-size:.97rem}
+  .fig{margin:22px 0;text-align:center}
+  .figcap{font-family:Verdana,Arial,sans-serif;font-size:.78rem;color:#5a6b7a;margin-top:6px}
+  code{font-family:Consolas,Menlo,monospace;font-size:.88em;background:#eef1f4;padding:1px 5px;border-radius:3px}
+  ul{padding-left:22px}
+  li{margin:5px 0}
+</style>
+</head>
+<body>
+<h1>Volume 4 — Cloud &amp; Infrastructure</h1>
+<p class="sub">Part I: Systems Foundations · ~22 printed pages · Companion to Volumes 1–3</p>
+
+<h2>0. Scope and mental model</h2>
+<p>This volume covers the substrate applications run on: container isolation, Kubernetes internals and failure modes, the compute spectrum, cloud storage classes, cloud networking, and multi-region architecture. Two organizing ideas carry the whole volume. First, <b>the control-plane / data-plane split</b>: the data plane does the work (serve requests, move packets, run containers); the control plane decides the configuration of that work (schedule pods, program routes, update membership). Well-designed infrastructure keeps data planes able to <em>keep running on last-known-good state when the control plane is down</em> — static stability — and the severity of most platform incidents is determined by whether that property holds. Second, <b>everything is reconciliation</b>: modern infrastructure is declarative — desired state in a store, controllers converging actual toward desired in a loop. Reconciliation absorbs transient failure beautifully and turns misconfiguration into a persistent, self-reasserting fault; understanding a platform means knowing its controllers, their inputs, and their failure behavior.</p>
+
+<h2>1. Containers: what they are made of</h2>
+
+<h3>1.1 Namespaces + cgroups + layered filesystems</h3>
+<p>A container is not a lightweight VM; it is an ordinary Linux process (tree) wrapped in three kernel mechanisms: <b>namespaces</b> partition <em>visibility</em> (PID, network, mount, UTS, IPC, user namespaces — each gives the process its own view of that resource); <b>cgroups</b> partition <em>consumption</em> (CPU, memory, IO limits and accounting); and a <b>layered union filesystem</b> (OverlayFS over content-addressed image layers) provides the image model — shared read-only layers plus a per-container writable layer, which is why images with common bases are cheap to store and fast to start. The runtime stack: an OCI runtime (<code>runc</code>) does the namespace/cgroup setup; <code>containerd</code>/CRI-O manage lifecycle and images; Kubernetes talks to them via CRI. Sandboxed runtimes (gVisor's user-space kernel, Kata's micro-VMs, Firecracker under serverless platforms) exist because <b>a shared kernel is a shared attack surface</b> — the isolation ladder is process &lt; container &lt; sandboxed container &lt; VM, and multi-tenant-untrusted workloads belong on the right end of it.</p>
+
+<h3>1.2 The two resource-limit behaviors everyone eventually debugs</h3>
+<ul>
+<li><b>CPU limits throttle; requests weight.</b> CPU <em>requests</em> set proportional scheduler weight under contention; CPU <em>limits</em> enforce hard quota per period (default 100ms) — a multithreaded service with limit=1 core can burn its quota in the first 10ms of a period across 10 threads, then sleep 90ms: p99 latency spikes with low average CPU. Latency-sensitive services frequently run with requests set honestly and limits removed (or generous), accepting weighted sharing instead of throttling; the decision deserves to be a stated policy, not folklore.</li>
+<li><b>Memory limits kill.</b> Exceeding a memory limit invokes the cgroup OOM killer — the process dies, often the JVM/Go runtime having no chance to react. Runtime heap settings must fit inside the limit with headroom for off-heap (JVM metaspace, direct buffers; Go's GOMEMLIMIT exists for exactly this). "OOMKilled, exit 137" loops are a container-native failure signature worth recognizing on sight.</li>
+</ul>
+
+<h2>2. Kubernetes internals</h2>
+
+<h3>2.1 The machine, in one diagram</h3>
+<div class="fig">
+<svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10">
+  <rect x="15" y="15" width="690" height="120" rx="8" fill="#f6f8fa" stroke="#8a97a3"/>
+  <text x="30" y="34" font-weight="bold" font-size="11">Control plane</text>
+  <rect x="30" y="46" width="120" height="40" rx="5" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.4"/><text x="90" y="63" text-anchor="middle">etcd</text><text x="90" y="77" text-anchor="middle" font-size="8.5">Raft store: desired + observed state</text>
+  <rect x="185" y="46" width="130" height="40" rx="5" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/><text x="250" y="63" text-anchor="middle">kube-apiserver</text><text x="250" y="77" text-anchor="middle" font-size="8.5">authn/z, validation, watch</text>
+  <rect x="350" y="46" width="150" height="40" rx="5" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/><text x="425" y="63" text-anchor="middle">controller-manager</text><text x="425" y="77" text-anchor="middle" font-size="8.5">reconciliation loops</text>
+  <rect x="535" y="46" width="120" height="40" rx="5" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/><text x="595" y="63" text-anchor="middle">scheduler</text><text x="595" y="77" text-anchor="middle" font-size="8.5">filter + score nodes</text>
+  <line x1="150" y1="66" x2="185" y2="66" stroke="#1a2733" stroke-width="1.2" marker-end="url(#g1)"/>
+  <line x1="350" y1="66" x2="315" y2="66" stroke="#1a2733" stroke-width="1.2" marker-end="url(#g1)"/>
+  <line x1="535" y1="66" x2="500" y2="66" stroke="#1a2733" stroke-width="1.2" marker-end="url(#g1)"/>
+  <text x="357" y="112" font-size="8.5" fill="#5a6b7a">everything goes through the API server; nothing talks to etcd directly; controllers and kubelets are watch-driven clients</text>
+  <rect x="15" y="160" width="690" height="120" rx="8" fill="#ffffff" stroke="#8a97a3"/>
+  <text x="30" y="179" font-weight="bold" font-size="11">Every node (data plane)</text>
+  <rect x="30" y="192" width="130" height="40" rx="5" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="95" y="209" text-anchor="middle">kubelet</text><text x="95" y="223" text-anchor="middle" font-size="8.5">watches its pods → CRI</text>
+  <rect x="195" y="192" width="150" height="40" rx="5" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="270" y="209" text-anchor="middle">containerd + runc</text><text x="270" y="223" text-anchor="middle" font-size="8.5">images, namespaces, cgroups</text>
+  <rect x="380" y="192" width="150" height="40" rx="5" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="455" y="209" text-anchor="middle">kube-proxy / eBPF</text><text x="455" y="223" text-anchor="middle" font-size="8.5">Service VIP → pod IPs</text>
+  <rect x="565" y="192" width="120" height="40" rx="5" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="625" y="209" text-anchor="middle">CNI plugin</text><text x="625" y="223" text-anchor="middle" font-size="8.5">pod IPs, routes, policy</text>
+  <line x1="250" y1="135" x2="95" y2="192" stroke="#5a6b7a" stroke-width="1.1" stroke-dasharray="4,3" marker-end="url(#g1)"/>
+  <text x="130" y="160" font-size="8.5" fill="#5a6b7a">watch (HTTPS)</text>
+  <text x="360" y="262" text-anchor="middle" font-size="9" fill="#8a5a12">Static stability test: with the control plane down, running pods keep running and Service routing keeps working — no new scheduling, no changes.</text>
+  <defs><marker id="g1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 1 — Kubernetes: a Raft-backed desired-state store, an API server in front of it, and watch-driven reconcilers everywhere else.</div>
+</div>
+
+<h3>2.2 The reconciliation model, precisely</h3>
+<p>Every Kubernetes behavior is one pattern instantiated repeatedly: a controller watches objects, compares desired vs observed, and issues idempotent corrections — level-triggered (act on current state), not edge-triggered (act on events), so missed events are harmless: the next loop converges anyway. Deployments → ReplicaSets → Pods is a controller chain; Services/EndpointSlices are a controller output consumed by kube-proxy; operators extend the same pattern to databases and Kafka clusters via CRDs. Three consequences worth internalizing:</p>
+<ul>
+<li><b>Self-healing and self-harming are the same mechanism.</b> The system re-asserts desired state relentlessly — deleting a "bad" pod by hand achieves nothing (the controller recreates it), and a wrong desired state is a fault that reapplies itself until corrected at the source. Debugging is therefore always "which controller wrote this, from what input" — follow the ownerReferences chain up.</li>
+<li><b>Convergence has ordering freedom.</b> Reconciliation makes few promises about <em>when</em> or <em>in what order</em> things converge; workloads must tolerate, e.g., a pod starting before its Service/DNS is programmed (crash-loop-with-backoff on startup dependency checks is normal, not an error to "fix" with sleeps).</li>
+<li><b>API server + etcd are the shared-fate core.</b> Watch storms (many clients re-listing large resource sets), oversized objects, and high-churn CRDs degrade etcd → API latency → every controller lags → the whole platform feels broken. etcd wants small objects, isolated fast disks (Volume 1's consensus warning applies verbatim), and defended request quotas (API priority &amp; fairness). Cluster size limits are really etcd + watch-fanout limits.</li>
+</ul>
+
+<h3>2.3 Scheduling, disruption, and autoscaling — the operational triad</h3>
+<ul>
+<li><b>Scheduling</b> = filter (resource requests fit? nodeSelector/affinity/taints satisfied?) then score (spread, bin-packing, custom). It runs on <em>requests</em>, not usage — so systematically over-requested workloads strand capacity (paid, unschedulable, idle), and under-requested ones overcommit nodes into eviction pressure. Request honesty is a FinOps issue and a reliability issue simultaneously.</li>
+<li><b>Disruption management:</b> voluntary disruptions (drains, upgrades) respect PodDisruptionBudgets; involuntary ones (node loss, OOM) don't. Topology-spread constraints + PDBs + graceful termination (preStop, SIGTERM handling, terminationGracePeriod aligned with drain deadlines from Volume 3 §4.3) are the difference between "node upgrades are invisible" and "every patch Tuesday is a mini-incident."</li>
+<li><b>Autoscaling layers:</b> HPA scales replicas on metrics (needs headroom and stable signals; on CPU it interacts badly with throttling); VPA right-sizes requests (in-place resize maturing; historically disruptive); Cluster Autoscaler / Karpenter-class provisioners add nodes when pods are unschedulable (minutes-scale — too slow for spikes, which is what overprovisioned headroom or warm pools are for). The layers interact: HPA adding pods → unschedulable → node scale-up → capacity arrives after the spike. Autoscaling is a control system, and untuned control systems oscillate.</li>
+</ul>
+
+<div class="de"><b>Architecture review questions:</b> "Does the platform pass the static-stability test — control plane down for an hour: what actually breaks?" · "Which workloads have CPU limits, and has anyone looked at their throttling metrics next to p99?" · "What are etcd's object-count, object-size, and watch-fanout hot spots — and what protects the API server from a misbehaving client?" · "For a routine node drain: PDBs, spread constraints, and termination grace verified — what error rate does a drain actually produce?"</div>
+
+<h2>3. The compute spectrum</h2>
+<table>
+<tr><th></th><th>VMs</th><th>Containers on K8s</th><th>Serverless containers (Fargate/Cloud Run class)</th><th>FaaS (Lambda class)</th></tr>
+<tr><td>Unit of deployment</td><td>Machine image</td><td>Pod</td><td>Container image</td><td>Function</td></tr>
+<tr><td>Scale-out granularity / speed</td><td>Minutes</td><td>Seconds (given node capacity)</td><td>Seconds–tens of seconds</td><td>Sub-second to seconds (cold starts)</td></tr>
+<tr><td>Isolation</td><td>Hardware-virtualized</td><td>Shared kernel (sandbox optional)</td><td>Micro-VM per task (typically)</td><td>Micro-VM per concurrent execution</td></tr>
+<tr><td>Operational surface owned</td><td>OS up</td><td>Cluster + everything on it</td><td>Just the container</td><td>Just the code</td></tr>
+<tr><td>Economic shape</td><td>Reserved/spot pricing; pay for allocation</td><td>Pay for nodes; utilization is your problem (bin-packing = the FinOps lever)</td><td>Pay per task-second</td><td>Pay per request+duration; idle is free</td></tr>
+<tr><td>Sharp edges</td><td>Slow elasticity; snowflake drift without image discipline</td><td>Platform team required; upgrade treadmill</td><td>Less control (daemonsets, privileged pods, custom kernels unavailable)</td><td>Cold starts; execution limits; state must live elsewhere; per-request cost crosses over at sustained high load</td></tr>
+</table>
+<p>The judgment pattern: spiky/low-duty-cycle and event-driven work suits the right side; sustained high-utilization fleets suit the left-middle, where reserved capacity and bin-packing dominate cost. The crossover is computable — sustained utilization above roughly 30–50% usually favors provisioned capacity over per-request pricing — and worth actually computing rather than deciding by fashion in either direction.</p>
+
+<h2>4. Cloud storage classes and their contracts</h2>
+<ul>
+<li><b>Block (EBS class):</b> a network-attached virtual disk for one instance — the substrate for databases. The contract details that matter: IOPS/throughput are provisioned dimensions (and can be the hidden bottleneck long before CPU); volumes are <em>zonal</em> (an AZ failure strands them — cross-AZ failover needs replication at the database layer, not the disk layer); snapshots are incremental to object storage and are the backup primitive. Local NVMe ("instance store") is faster and ephemeral — fine for caches and scratch, fatal for data that must survive an instance stop.</li>
+<li><b>Object (S3 class):</b> HTTP GET/PUT of immutable blobs: 11-nines-durability by cross-AZ erasure coding, strong read-after-write consistency (as of 2020 in S3's case), effectively infinite throughput <em>if the keyspace spreads</em> (per-prefix request limits reward key design), no rename (copy+delete), no appends (multipart composition instead), and per-request pricing that makes many-small-objects an anti-pattern (compact, or batch). Lifecycle tiering (standard → infrequent → archive) is where storage FinOps lives. Object storage is the cloud's real shared filesystem and the backbone of every lakehouse (Volume 11).</li>
+<li><b>File (EFS/Filestore class):</b> POSIX-ish shared filesystems — the right tool for lift-and-shift and shared-content patterns, with latency and locking semantics that disappoint anyone treating them as local disks.</li>
+<li><b>The durability vs availability distinction deserves precision:</b> object stores rarely lose bytes (durability) but do have outages (availability) — and a region-level object-store incident is a shared-fate event for everything above it. Critical data's cross-region replication is a deliberate architecture decision with a cost line, not a default.</li>
+</ul>
+
+<h2>5. Cloud networking: the VPC model</h2>
+<ul>
+<li><b>The mental model:</b> a VPC is a private address space partitioned into <em>zonal subnets</em>, with route tables deciding where traffic can go, an internet gateway for public egress/ingress, NAT gateways for private-subnet egress, and security groups (stateful, instance-attached) plus network ACLs (stateless, subnet-level) as the filtering layers. Cloud networking is software-defined: "the network" is a distributed control plane programming host-level virtual switches — which is why its failures look like state-propagation failures (a rule applied in one AZ but not yet another) rather than cable cuts.</li>
+<li><b>Cross-AZ traffic is metered.</b> Inter-AZ data transfer has a per-GB price, which quietly shapes architecture: zone-aware routing (prefer same-AZ backends), replica placement, and chatty east-west protocols all have a cost dimension. Cross-region and egress-to-internet are steeper still; data-transfer line items are among the most common FinOps surprises (Volume 17).</li>
+<li><b>Private connectivity:</b> VPC peering (non-transitive, address-space Tetris), transit gateways / hub-and-spoke (the scalable enterprise pattern), and PrivateLink-class endpoints (expose one service into another VPC without route-table merging — the least-privilege option for service-to-service across trust boundaries, including SaaS). IP address planning (non-overlapping CIDRs across hundreds of VPCs, plus on-prem ranges) is unglamorous and, done badly, becomes a multi-year constraint; IPAM discipline early is cheap insurance.</li>
+<li><b>Known chokepoints with limits and pricing:</b> NAT gateways (per-GB processing charges and connection-scaling limits — a favorite silent cost and a favorite silent bottleneck for high-egress fleets) and per-instance/per-ENI connection-tracking limits (Volume 3 §7's state-exhaustion family, cloud edition).</li>
+</ul>
+
+<h2>6. Multi-region architecture</h2>
+
+<h3>6.1 The honest decision tree</h3>
+<p>Multi-region is bought for three distinct reasons that demand different designs: <b>latency</b> (serve users near them — often satisfied by CDN + edge for read-heavy products without any multi-region write story), <b>survivability</b> (tolerate a region failure — the DR conversation: RTO/RPO targets priced against architecture), and <b>data residency</b> (regulatory partitioning — really a sharding-by-jurisdiction problem). Conflating them produces designs that pay active-active costs for what is actually a DR requirement.</p>
+
+<table>
+<tr><th>Pattern</th><th>Shape</th><th>RTO/RPO character</th><th>The real costs</th></tr>
+<tr><td>Backup &amp; restore</td><td>Backups replicated cross-region; rebuild on disaster</td><td>Hours+ / minutes–hours</td><td>Cheapest; restore time is usually fiction until drilled</td></tr>
+<tr><td>Pilot light / warm standby</td><td>Data replicated continuously; minimal (or scaled-down) stack ready to inflate</td><td>Tens of minutes / seconds–minutes</td><td>Capacity race during regional failover if the whole industry evacuates simultaneously; keep critical quotas pre-reserved</td></tr>
+<tr><td>Active-passive</td><td>Full stack in both; one takes traffic; async replication</td><td>Minutes / seconds</td><td>Paying ~2× to use 1×; failover confidence decays without regular exercised failovers; the async-loss window is a business sign-off</td></tr>
+<tr><td>Active-active</td><td>All regions serve; data layer is the hard part</td><td>~0 / ~0 (design-dependent)</td><td>Either quorum write latency (distributed SQL spanning regions), conflict resolution (multi-leader), or — most tractably — <b>home-region partitioning</b>: each entity (user, tenant, order) is written in one home region and rehomed on failure, making cross-region conflicts structurally rare</td></tr>
+</table>
+
+<h3>6.2 Cell-based architecture: blast-radius engineering</h3>
+<div class="fig">
+<svg viewBox="0 0 720 235" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10">
+  <rect x="20" y="20" width="680" height="50" rx="6" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.4"/>
+  <text x="360" y="40" text-anchor="middle" font-weight="bold">Thin routing layer (the only truly global component — keep it tiny, static, boring)</text>
+  <text x="360" y="57" text-anchor="middle" font-size="9">maps tenant/user → cell; cached, statically stable, no business logic</text>
+  <g>
+    <rect x="30" y="100" width="150" height="105" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/>
+    <text x="105" y="120" text-anchor="middle" font-weight="bold">Cell 1</text>
+    <text x="105" y="138" text-anchor="middle" font-size="9">full stack: services,</text>
+    <text x="105" y="152" text-anchor="middle" font-size="9">DB shard, queues, cache</text>
+    <text x="105" y="170" text-anchor="middle" font-size="9">tenants A–F</text>
+    <text x="105" y="190" text-anchor="middle" font-size="9" fill="#0a6b3d">~n% of customers</text>
+  </g>
+  <g>
+    <rect x="210" y="100" width="150" height="105" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/>
+    <text x="285" y="120" text-anchor="middle" font-weight="bold">Cell 2</text>
+    <text x="285" y="138" text-anchor="middle" font-size="9">identical stack,</text>
+    <text x="285" y="152" text-anchor="middle" font-size="9">independent state</text>
+    <text x="285" y="170" text-anchor="middle" font-size="9">tenants G–M</text>
+    <text x="285" y="190" text-anchor="middle" font-size="9" fill="#0a6b3d">no cross-cell calls</text>
+  </g>
+  <g>
+    <rect x="390" y="100" width="150" height="105" rx="6" fill="#ffffff" stroke="#c0392b" stroke-width="1.6"/>
+    <text x="465" y="120" text-anchor="middle" font-weight="bold" fill="#c0392b">Cell 3 ✗</text>
+    <text x="465" y="140" text-anchor="middle" font-size="9" fill="#c0392b">bad deploy / poison</text>
+    <text x="465" y="154" text-anchor="middle" font-size="9" fill="#c0392b">tenant / data corruption</text>
+    <text x="465" y="176" text-anchor="middle" font-size="9">impact fenced at</text>
+    <text x="465" y="190" text-anchor="middle" font-size="9">the cell boundary</text>
+  </g>
+  <g>
+    <rect x="570" y="100" width="130" height="105" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/>
+    <text x="635" y="120" text-anchor="middle" font-weight="bold">Cell N</text>
+    <text x="635" y="145" text-anchor="middle" font-size="9">deploys roll</text>
+    <text x="635" y="159" text-anchor="middle" font-size="9">cell-by-cell —</text>
+    <text x="635" y="173" text-anchor="middle" font-size="9">canary = one cell</text>
+  </g>
+  <line x1="360" y1="70" x2="105" y2="100" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#h1)"/>
+  <line x1="360" y1="70" x2="285" y2="100" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#h1)"/>
+  <line x1="360" y1="70" x2="465" y2="100" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#h1)"/>
+  <line x1="360" y1="70" x2="635" y2="100" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#h1)"/>
+  <text x="360" y="226" text-anchor="middle" font-size="9.5" fill="#8a5a12">Blast radius = 1/N of customers, by construction — for software faults and poison inputs, not just infrastructure failure. AZs don't give you that.</text>
+  <defs><marker id="h1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#5a6b7a"/></marker></defs>
+</svg>
+<div class="figcap">Fig 2 — Cell-based architecture: many identical, isolated full-stack instances behind a minimal router; the deployment unit, capacity unit, and failure unit become the same thing.</div>
+</div>
+<p>Cells complement (not replace) multi-AZ and multi-region: AZs protect against infrastructure failure; cells protect against <em>correlated software failure</em> — the bad deploy, the poison request, the corrupted cache — which infrastructure redundancy replicates faithfully to every zone. The costs: per-cell capacity headroom (N smaller stacks bin-pack worse than one big one), cell-migration tooling for rebalancing and whale tenants, and the discipline to keep the routing layer thin (every feature added to the global router recreates the shared fate cells exist to remove).</p>
+
+<h3>6.3 Failover discipline: what separates paper DR from real DR</h3>
+<ul>
+<li><b>Failover must not depend on the failing region</b> — runbooks, tooling, DNS control, identity/SSO, secrets, and artifact registries all need existence outside the affected region; circular dependencies here are the classic discovered-during-the-incident flaw. (Control-plane dependencies count: if deployment tooling runs only in the primary region, the standby can't be changed during the event.)</li>
+<li><b>Data is the decision.</b> Failover of stateless tiers is trivial; the real questions are the async replication loss window (RPO — signed off by the business in writing), replica promotion mechanics (and fencing the old primary — Volume 1 §4.4 verbatim), and the failback plan (returning is often harder than leaving: reverse replication, divergence reconciliation).</li>
+<li><b>Exercised or fictional:</b> failover paths decay — permissions drift, capacity assumptions rot, runbooks reference decommissioned systems. Quarterly game days that actually shift production traffic (or a deliberate "exercise the standby monthly by serving from it" rotation) are the only known preservative. A DR plan's real RTO is the duration of its last successful drill, not the number in the document.</li>
+</ul>
+
+<h2>7. Infrastructure as code and immutable infrastructure</h2>
+<p>Two disciplines close the volume because they underwrite everything above. <b>Declarative IaC</b> (Terraform/OpenTofu-class, or K8s manifests + GitOps controllers): infrastructure defined in version-controlled code, reviewed like code, applied by pipelines — the plan/diff step before apply is the safety mechanism, drift detection is the audit, and "someone changed it in the console" becomes an incident category to engineer away. <b>Immutable infrastructure:</b> never patch in place — build a new image/artifact, roll it out, destroy the old (the pets→cattle shift). Together they make environments reproducible, rollbacks real (previous artifact, not undo-scripts), and configuration drift — historically the largest source of "works in staging" — structurally impossible rather than procedurally discouraged. The mature endpoint is the platform treating <em>everything</em> (nodes, clusters, even regions in cell-based designs) as replaceable-from-code within a bounded time, which quietly is also the strongest DR posture available.</p>
+
+<h2>8. Architecture review checklist — cloud &amp; infrastructure</h2>
+<ol style="font-family:Verdana,Arial,sans-serif;font-size:.86rem;line-height:1.9">
+<li><b>Static stability:</b> control plane down one hour — enumerated actual impact, tested, not asserted.</li>
+<li><b>Resource honesty:</b> requests reflect usage (utilization vs requests reported per team); CPU-limit throttling examined next to p99; OOMKilled loops treated as design bugs.</li>
+<li><b>etcd/API health:</b> object size/count discipline, watch fanout, priority &amp; fairness protections, isolated fast disks.</li>
+<li><b>Disruption readiness:</b> PDBs + spread + graceful termination verified by a measured routine-drain error rate.</li>
+<li><b>Compute economics:</b> utilization crossover computed for serverless vs provisioned; bin-packing owned by someone.</li>
+<li><b>Storage contracts:</b> zonal-volume failure story at the database layer; object-store key-spread and small-object hygiene; lifecycle tiering active.</li>
+<li><b>Network cost &amp; limits:</b> cross-AZ traffic shaping (zone-aware routing), NAT gateway cost/limits, conntrack headroom, CIDR/IPAM plan that survives 5 years.</li>
+<li><b>Multi-region honesty:</b> which of latency/survivability/residency is being bought; RPO signed by the business; failover free of circular dependencies on the failing region.</li>
+<li><b>Blast radius:</b> largest correlated-failure unit named (cell? region? global router? shared control plane?) and accepted explicitly.</li>
+<li><b>Drill dates:</b> last real region-evacuation / standby-serving exercise, dated, with measured RTO.</li>
+</ol>
+
+<h2>9. Canonical reading</h2>
+<ul>
+<li><i>Kubernetes: Up and Running</i> for the model, then the Kubernetes documentation's architecture and API-machinery sections — controllers and watches are the part worth studying twice.</li>
+<li>"Borg, Omega, and Kubernetes" (ACM Queue) — where the reconciliation model came from and why.</li>
+<li>Amazon Builders' Library: "Static stability using availability zones," "Avoiding overload in distributed systems," and the cell-based architecture material (re:Invent talks and the AWS well-architected DR whitepaper for RTO/RPO patterns).</li>
+<li>"Firecracker: Lightweight Virtualization for Serverless Applications" (NSDI) — the isolation ladder made concrete.</li>
+<li>Provider documentation on VPC design and inter-region data transfer pricing — read once with a cost model open; the architecture implications are in the price sheet.</li>
+</ul>
+
+<h2>10. Chapter summary — ten sentences to retain</h2>
+<ol style="line-height:1.9">
+<li>Control planes decide; data planes do — and good platforms keep data planes serving on last-known-good state when control planes fail.</li>
+<li>Everything is reconciliation: self-healing and self-reasserting misconfiguration are the same loop, so debugging means finding the controller and its input.</li>
+<li>A container is namespaces + cgroups + layered filesystems around an ordinary process; the isolation ladder runs process → container → sandbox → VM.</li>
+<li>CPU limits throttle (latency spikes at low average utilization); memory limits kill (exit 137); requests are the scheduling and cost currency, so their honesty is both reliability and FinOps.</li>
+<li>etcd and the API server are the platform's shared fate: small objects, fast isolated disks, defended quotas.</li>
+<li>Autoscalers are stacked control loops with minutes-scale actuators — headroom covers the gap, and untuned loops oscillate.</li>
+<li>Object storage is the cloud's real shared filesystem: durable, strongly consistent, throughput-by-key-design, priced per request and per tier.</li>
+<li>Cloud networks are software-defined state machines with metered links; cross-AZ/egress pricing and NAT/conntrack limits are architecture inputs, not billing trivia.</li>
+<li>Buy multi-region for a named reason — latency, survivability, or residency — and prefer home-region partitioning and cells over symmetric active-active everywhere.</li>
+<li>A DR plan's real RTO is the duration of its last successful drill.</li>
+</ol>
+
+<p class="sub" style="margin-top:36px">Next in Part I: Volume 5 (Capacity &amp; Hardware Fundamentals) — or jump to Volume 9 (Security Architecture) per the gap-priority order.</p>
+</body>
+</html>

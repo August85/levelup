@@ -2,6 +2,7 @@
   --bg: #fbfaf7; --surface: #ffffff; --surface-2: #f2f0eb; --ink: #1c2530; --ink-2: #4c5966; --ink-3: #7d8994;
   --line: #e4e1da; --accent: #0a4d8c; --accent-soft: #e3edf7; --ok: #0a6b3d; --ok-soft: #e1f2e8; --mark: #fff1a8;
   --code-bg: #f3f1ec;
+  --de-bg: #fdf6ec; --de-line: #b7791f; --de-ink: #8a5a12; --war-bg: #f3f0fa; --war-line: #5b4a8a;
   --serif: "Iowan Old Style", "Charter", "Palatino", Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -12,17 +13,17 @@
 }
 :root[data-theme="sepia"] {
   --bg: #f6efe1; --surface: #fbf6ea; --surface-2: #efe5d1; --ink: #3b2f22; --ink-2: #5d4d3b; --ink-3: #8a7862;
-  --line: #e2d5bb; --accent: #8a4b14; --accent-soft: #f1e1c8; --code-bg: #efe5d1; --mark: #f5dd8a;
+  --line: #e2d5bb; --accent: #8a4b14; --accent-soft: #f1e1c8; --code-bg: #efe5d1; --mark: #f5dd8a; --de-bg: #f3e6cd; --war-bg: #ece3e8;
 }
 :root[data-theme="dark"] {
   --bg: #14171b; --surface: #1c2025; --surface-2: #23282e; --ink: #e7e5e0; --ink-2: #b4b8bd; --ink-3: #868c93;
-  --line: #2e343b; --accent: #7cb2ea; --accent-soft: #1d2e42; --ok: #6cd39b; --ok-soft: #173326; --code-bg: #1f2429; --mark: #5c4d12;
+  --line: #2e343b; --accent: #7cb2ea; --accent-soft: #1d2e42; --ok: #6cd39b; --ok-soft: #173326; --code-bg: #1f2429; --mark: #5c4d12; --de-bg: #2a2418; --de-line: #c99a45; --de-ink: #e2b866; --war-bg: #221f2e; --war-line: #8f7cc4;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]):not([data-theme="sepia"]) {
     --bg: #14171b; --surface: #1c2025; --surface-2: #23282e; --ink: #e7e5e0; --ink-2: #b4b8bd; --ink-3: #868c93;
-    --line: #2e343b; --accent: #7cb2ea; --accent-soft: #1d2e42; --ok: #6cd39b; --ok-soft: #173326; --code-bg: #1f2429; --mark: #5c4d12;
+    --line: #2e343b; --accent: #7cb2ea; --accent-soft: #1d2e42; --ok: #6cd39b; --ok-soft: #173326; --code-bg: #1f2429; --mark: #5c4d12; --de-bg: #2a2418; --de-line: #c99a45; --de-ink: #e2b866; --war-bg: #221f2e; --war-line: #8f7cc4;
     color-scheme: dark;
   }
 }
@@ -211,3 +212,15 @@ details.toc-box[open] summary::after { content: "–"; }
 @media (min-width: 760px) { .wrap { padding-top: 28px; } }
 [hidden] { display: none !important; }
 .reader h2, .reader h3 { scroll-margin-top: calc(var(--top-h) + var(--safe-t) + 64px); }
+/* Author volume elements */
+.reader .callout { border-radius: 12px; padding: 14px 16px; margin: 1.4em 0; font-size: .92em; line-height: 1.55; }
+.reader .callout.de { background: var(--de-bg); border-left: 4px solid var(--de-line); }
+.reader .callout.de > b:first-child { color: var(--de-ink); }
+.reader .callout.warstory { background: var(--war-bg); border-left: 4px solid var(--war-line); }
+.reader .fig { margin: 1.4em -16px; padding: 12px 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; text-align: center; }
+.reader .fig svg { display: block; width: 720px; max-width: none; height: auto; margin: 0 auto; background: #fff; border-radius: 10px; padding: 6px; }
+.reader .figcap { font-family: var(--sans); font-size: 13px; color: var(--ink-3); margin-top: 6px; position: sticky; left: 0; text-align: left; }
+.reader ol.tasks { list-style: none; padding-left: 0; }
+.reader ol.tasks li.task { margin-left: 0; }
+.reader li.task label > span { flex: 1; }
+.item-body p > strong:first-child { font-family: var(--sans); font-size: .78em; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); display: block; margin-top: 1.4em; }

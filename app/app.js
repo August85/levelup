@@ -149,7 +149,13 @@ route(/^\/$/, async () => {
   const last = ls.get('lastVol');
   const lastVol = last && lib.volumes.find((v) => v.n === last && v.ready);
   const ready = lib.volumes.filter((v) => v.ready).length;
-  const p = lib.principles.length ? lib.principles[Math.floor(Date.now() / 864e5) % lib.principles.length] : null;
+  const day = Math.floor(Date.now() / 864e5);
+  const catalogP = (lib.principleCatalog || []).flatMap((c) => c.items.map((i) => ({ ...i, cat: c.title })));
+  const algos = (lib.algorithms || []).flatMap((c) => c.items);
+  const nPrinciples = catalogP.length + lib.principles.length;
+  const p = catalogP.length ? catalogP[day % catalogP.length] : null;
+  const vp = !p && lib.principles.length ? lib.principles[day % lib.principles.length] : null;
+  const idea = lib.keyIdeas?.length ? lib.keyIdeas[(day * 7) % lib.keyIdeas.length] : null;
   const row = (v) => {
     const pr = prog[v.n] || 0;
     return `<a class="row" href="#/vol/${v.n}"><div class="badge ${v.ready ? '' : 'dim'}">${v.n}</div><div class="body">
@@ -157,14 +163,25 @@ route(/^\/$/, async () => {
       <div class="s">${esc(v.scope)}</div>
       ${v.ready && pr > .02 && pr <= .97 ? `<div class="bar"><div style="width:${Math.round(pr * 100)}%"></div></div>` : ''}</div></a>`;
   };
+  const coll = (href, badge, title, sub) => `<a class="row" href="${href}"><div class="badge">${badge}</div><div class="body"><div class="t">${title}</div><div class="s">${sub}</div></div></a>`;
   view.innerHTML = `<div class="wrap">
     <div class="hero"><div class="eyebrow">Knowledge Library</div><h2>${esc(lib.title)}</h2><p>${esc(lib.subtitle)}</p>
-      <div class="meta"><span>${ready} of ${lib.volumes.length} volumes ready</span><span>·</span><span>${lib.principles.length} design principles</span></div></div>
+      <div class="meta"><span>${ready} of ${lib.volumes.length} volumes ready</span><span>·</span><span>${nPrinciples} principles</span><span>·</span><span>${algos.length} algorithms</span></div></div>
     ${lastVol ? `<div class="section-title"><h3>Continue reading</h3></div>
       <a class="card row" style="border-top:1px solid var(--line)" href="#/vol/${lastVol.n}"><div class="badge">${lastVol.n}</div><div class="body"><div class="t">${esc(lastVol.title)}</div>
       <div class="bar"><div style="width:${Math.round((prog[lastVol.n] || 0) * 100)}%"></div></div><div class="meta">${Math.round((prog[lastVol.n] || 0) * 100)}% · ${readMins(lastVol.words)} min total</div></div></a>` : ''}
     ${p ? `<div class="section-title"><h3>Principle of the day</h3><a href="#/principles">All principles</a></div>
-      <a class="card principle" style="display:block;text-decoration:none;color:inherit" href="#/principles?vol=${p.vol}"><div class="name">${esc(p.name)}</div><div class="txt">${p.html}</div><div class="src muted">Vol ${p.vol} · ${esc(p.volTitle)}</div></a>` : ''}
+      <a class="card principle" style="display:block;text-decoration:none;color:inherit" href="#/principle/${p.id}"><div class="eyebrow">${esc(p.cat)}</div><div class="name">${esc(p.name)}</div><div class="txt">${esc(p.summary)}</div></a>` : ''}
+    ${vp ? `<div class="section-title"><h3>Principle of the day</h3><a href="#/principles">All principles</a></div>
+      <a class="card principle" style="display:block;text-decoration:none;color:inherit" href="#/principles?tab=vol&vol=${vp.vol}"><div class="name">${esc(vp.name)}</div><div class="txt">${vp.html}</div><div class="src muted">Vol ${vp.vol} · ${esc(vp.volTitle)}</div></a>` : ''}
+    ${idea ? `<div class="section-title"><h3>Key idea</h3><a href="#/vol/${idea.vol}">Vol ${idea.vol}</a></div>
+      <div class="card principle"><div class="txt" style="color:var(--ink)">${idea.html}</div><div class="src muted">${esc(idea.volTitle)} · ten sentences to retain</div></div>` : ''}
+    <div class="section-title"><h3>Collections</h3></div>
+    <div class="list">
+      ${coll('#/principles', 'P', 'Design Principles', `${nPrinciples} principles: a cross-cutting catalog plus those drawn from each volume`)}
+      ${coll('#/algorithms', 'A', 'Algorithms', algos.length ? `${algos.length} algorithms across ${lib.algorithms.length} areas, from Raft to HNSW` : 'Being written')}
+      ${coll('#/review', 'R', 'Review Mode', `${(lib.probes || []).length} DE probe sets and every review checklist, for prep before an architecture review`)}
+    </div>
     ${lib.parts.map((part) => `<div class="section-title"><h3>Part ${part.id} · ${esc(part.title)}</h3></div>
       <div class="list">${part.volumes.map((n) => row(lib.volumes.find((v) => v.n === n))).join('')}</div>`).join('')}
     <p class="small muted" style="margin-top:24px">${esc(lib.howTo)}</p>
@@ -172,7 +189,9 @@ route(/^\/$/, async () => {
 });
 
 /* ---------- Volume reader ---------- */
-const JUMPS = [['Overview', 'overview'], ['Principles', 'design-principles'], ['Trade-offs', 'trade-offs-and-decision-frameworks'], ['Failure modes', 'failure-modes-and-war-stories'], ['DE probes', 'what-a-de-probes'], ['Checklist', 'review-checklist']];
+// Each volume has the author's text and, for some, Claude's companion notes (principles, trade-offs, probes).
+const COMPANION_JUMPS = [['Principles', 'design-principles'], ['Trade-offs', 'trade-offs-and-decision-frameworks'], ['Failure modes', 'failure-modes-and-war-stories'], ['DE probes', 'what-a-de-probes'], ['Checklist', 'review-checklist']];
+const MAIN_JUMPS = [['Checklist', /checklist/i], ['Summary', /summary/i], ['Reading', /reading/i]];
 route(/^\/vol\/(\d+)(?:\/(.+))?$/, async ([, n, anchor], q) => {
   setTab('library');
   const lib = await library(); const v = await vol(n);
@@ -181,31 +200,44 @@ route(/^\/vol\/(\d+)(?:\/(.+))?$/, async ([, n, anchor], q) => {
   const idx = lib.volumes.indexOf(v); const prev = lib.volumes[idx - 1], next = lib.volumes[idx + 1];
   const pager = `<div class="pager">${prev ? `<a href="#/vol/${prev.n}"><div class="card"><div class="dir">← Vol ${prev.n}</div><div class="nm">${esc(prev.title)}</div></div></a>` : '<span style="flex:1"></span>'}
     ${next ? `<a href="#/vol/${next.n}" style="text-align:right"><div class="card"><div class="dir">Vol ${next.n} →</div><div class="nm">${esc(next.title)}</div></div></a>` : '<span style="flex:1"></span>'}</div>`;
+  const comp = !!v.companion && (anchor === 'companion' || (anchor || '').startsWith(`c${v.n}-`));
+  const doc = comp ? v.companion : v;
   const head = `<div class="vol-head"><div class="eyebrow">Part ${v.part} · ${esc(v.partTitle)}</div><h2>${esc(v.title)}</h2>
     ${v.summary ? `<p class="summary">${esc(v.summary)}</p>` : ''}
-    <div class="meta">${v.ready ? `<span class="pill ok">Ready</span><span>${readMins(v.words)} min read</span><span>·</span><span>${v.principleCount} principles</span>` : '<span class="pill">Queued</span>'}</div></div>`;
+    <div class="meta">${v.ready ? `<span class="pill ok">Ready</span><span>${readMins(doc.words)} min read</span>${v.principleCount ? `<span>·</span><span>${v.principleCount} principles</span>` : ''}` : '<span class="pill">Queued</span>'}</div></div>`;
   if (!v.ready) {
     view.innerHTML = `<div class="wrap">${head}<div class="reader"><h3>Scope</h3><ul>${v.scope.split(/,\s*|;\s*/).map((s) => `<li>${esc(s)}</li>`).join('')}</ul></div>
       <div class="queued-note">This volume hasn't been written yet. It will appear here automatically once it's added to the library.</div>${pager}</div>`;
     return;
   }
   ls.set('lastVol', v.n);
-  const ids = new Set(v.sections.map((s) => s.id));
-  const jumps = JUMPS.filter(([, id]) => ids.has(`v${v.n}-${id}`));
+  let jumps;
+  if (comp) {
+    const ids = new Set(doc.sections.map((s) => s.id));
+    jumps = COMPANION_JUMPS.filter(([, id]) => ids.has(`c${v.n}-${id}`)).map(([l, id]) => [l, `#/vol/${v.n}/c${v.n}-${id}`]);
+  } else {
+    jumps = MAIN_JUMPS.map(([l, re]) => [l, doc.sections.find((s) => s.level === 2 && re.test(s.title))]).filter(([, s]) => s).map(([l, s]) => [l, `#/vol/${v.n}/${s.id}`]);
+    if ((lib.probes || []).some((p) => p.vol === v.n)) jumps.unshift(['DE probes', `#/review?vol=${v.n}`]);
+  }
+  const tidy = (t) => t.replace(/^\d+(\.\d+)*\.?\s+/, '');
   view.innerHTML = `<div class="wrap">${head}
-    <div class="chips jump">${jumps.map(([label, id]) => `<a class="chip" href="#/vol/${v.n}/v${v.n}-${id}">${label}</a>`).join('')}</div>
-    <details class="toc-box"><summary>Contents</summary><div class="toc">${v.sections.map((s) => `<a class="l${s.level}" href="#/vol/${v.n}/${s.id}">${esc(s.title)}</a>`).join('')}</div></details>
-    <article class="reader" id="reader">${v.html}</article>${pager}</div>`;
+    ${v.companion ? `<div class="seg"><button class="${comp ? '' : 'on'}" data-action="go" data-href="#/vol/${v.n}">Volume</button><button class="${comp ? 'on' : ''}" data-action="go" data-href="#/vol/${v.n}/companion">Companion notes</button></div>` : ''}
+    ${jumps.length ? `<div class="chips jump">${jumps.map(([label, href]) => `<a class="chip" href="${href}">${label}</a>`).join('')}</div>` : ''}
+    <details class="toc-box"><summary>Contents</summary><div class="toc">${doc.sections.map((s) => `<a class="l${s.level}" href="#/vol/${v.n}/${s.id}">${esc(tidy(s.title))}</a>`).join('')}</div></details>
+    ${comp ? '<p class="small muted">Companion notes: design principles, trade-offs, failure modes and review probes written to sit alongside your volume.</p>' : ''}
+    <article class="reader" id="reader">${doc.html}</article>${pager}</div>`;
 
   // Persisted checklist ticks.
+  const ck = comp ? `c${v.n}` : `${v.n}`;
   const checks = ls.get('checks', {});
   $$('#reader input[data-task]').forEach((cb, i) => {
-    const key = `${v.n}:${i}`; cb.checked = !!checks[key];
+    const key = `${ck}:${i}`; cb.checked = !!checks[key];
     cb.onchange = () => { const c = ls.get('checks', {}); if (cb.checked) c[key] = 1; else delete c[key]; ls.set('checks', c); };
   });
 
   // Reading progress, saved per volume; restored when opened without a section.
   const article = $('#reader');
+  const posKey = 'pos:' + ck;
   const measure = () => {
     const r = article.getBoundingClientRect(); const h = r.height - innerHeight * .6;
     return Math.min(1, Math.max(0, -r.top / Math.max(1, h)));
@@ -215,22 +247,23 @@ route(/^\/vol\/(\d+)(?:\/(.+))?$/, async ([, n, anchor], q) => {
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(() => {
       const p = measure(); setProgress(p);
-      const all = ls.get('progress', {}); if (p > (all[v.n] || 0) || p < (all[v.n] || 0) - .02) { all[v.n] = p; ls.set('progress', all); }
-      ls.set('pos:' + v.n, scrollY);
+      if (!comp) { const all = ls.get('progress', {}); if (p > (all[v.n] || 0) || p < (all[v.n] || 0) - .02) { all[v.n] = p; ls.set('progress', all); } }
+      ls.set(posKey, scrollY);
     });
   };
   addEventListener('scroll', onScroll, { passive: true });
   cleanup = () => removeEventListener('scroll', onScroll);
 
-  if (anchor) {
+  if (anchor && anchor !== 'companion') {
     const el = document.getElementById(decodeURIComponent(anchor));
     if (el) { el.scrollIntoView(); el.classList.add('flash'); }
     const term = q.get('hl'); if (term) highlight(article, term);
   } else {
-    scrollTo(0, ls.get('pos:' + v.n, 0));
+    scrollTo(0, ls.get(posKey, 0));
   }
   onScroll();
 });
+actions.go = (b) => { location.hash = b.dataset.href; };
 
 function highlight(root, query) {
   const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
@@ -245,23 +278,90 @@ function highlight(root, query) {
   });
 }
 
-/* ---------- Principles ---------- */
+/* ---------- Principles, Algorithms, Review Mode ---------- */
+const catList = (cats, base) => cats.map((c) => `<div class="section-title"><h3>${esc(c.title)}</h3><span class="small muted">${c.items.length}</span></div>
+  <div class="list">${c.items.map((i) => `<a class="row" href="${base}${i.id}"><div class="body"><div class="t">${esc(i.name)}</div><div class="s">${esc(i.summary)}</div></div></a>`).join('')}</div>`).join('');
+
 route(/^\/principles$/, async (m, q) => {
-  setTab('library'); setTop('Design Principles', { back: true, actions: `<button class="icon-btn" data-action="shuffle" aria-label="Random principle">${ICON.shuffle}</button>` });
-  const lib = await library(); const only = q.get('vol');
-  const vols = lib.volumes.filter((v) => v.ready);
+  setTab('library');
+  const lib = await library();
+  const hasCat = (lib.principleCatalog || []).length;
+  const tab = q.get('tab') || (hasCat ? 'cat' : 'vol');
+  setTop('Design Principles', { back: true, actions: `<button class="icon-btn" data-action="shuffle" aria-label="Random principle">${ICON.shuffle}</button>` });
+  const seg = hasCat ? `<div class="seg"><button class="${tab === 'cat' ? 'on' : ''}" data-action="go" data-href="#/principles">Catalog</button><button class="${tab === 'vol' ? 'on' : ''}" data-action="go" data-href="#/principles?tab=vol">From the volumes</button></div>` : '';
+  if (tab === 'cat') {
+    view.innerHTML = `<div class="wrap" id="plist">${seg}${catList(lib.principleCatalog, '#/principle/')}</div>`;
+    return;
+  }
+  const only = q.get('vol');
+  const vols = lib.volumes.filter((v) => v.principleCount);
   const list = lib.principles.filter((p) => !only || p.vol === +only);
-  view.innerHTML = `<div class="wrap">
-    <div class="chips" style="margin-bottom:10px"><a class="chip ${!only ? 'on' : ''}" href="#/principles">All</a>${vols.map((v) => `<a class="chip ${+only === v.n ? 'on' : ''}" href="#/principles?vol=${v.n}">${v.n} · ${esc(v.title)}</a>`).join('')}</div>
+  view.innerHTML = `<div class="wrap">${seg}
+    <div class="chips" style="margin-bottom:10px"><a class="chip ${!only ? 'on' : ''}" href="#/principles?tab=vol">All</a>${vols.map((v) => `<a class="chip ${+only === v.n ? 'on' : ''}" href="#/principles?tab=vol&vol=${v.n}">${v.n} · ${esc(v.title)}</a>`).join('')}</div>
     <div id="plist">${list.map((p, i) => `<div class="card principle" id="p${i}"><div class="eyebrow">Vol ${p.vol} · ${esc(p.volTitle)}</div><div class="name">${esc(p.name)}</div><div class="txt">${p.html}</div>
-      <div class="src"><a href="#/vol/${p.vol}/v${p.vol}-design-principles">Read in context →</a></div></div>`).join('') || '<div class="empty">No principles yet.</div>'}</div></div>`;
+      <div class="src"><a href="#/vol/${p.vol}/c${p.vol}-design-principles">Read in context →</a></div></div>`).join('') || '<div class="empty">No principles yet.</div>'}</div></div>`;
 });
-actions.shuffle = () => {
-  const cards = $$('#plist .card'); if (!cards.length) return;
-  const c = cards[Math.floor(Math.random() * cards.length)];
-  c.scrollIntoView({ block: 'center', behavior: 'smooth' }); c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash');
-  c.style.animation = 'flash 1.6s ease-out'; setTimeout(() => (c.style.animation = ''), 1700);
+actions.shuffle = async () => {
+  const lib = await library();
+  const ids = (lib.principleCatalog || []).flatMap((c) => c.items.map((i) => i.id));
+  if (location.hash.includes('tab=vol') || !ids.length) {
+    const cards = $$('#plist .card'); if (!cards.length) return;
+    const c = cards[Math.floor(Math.random() * cards.length)];
+    c.scrollIntoView({ block: 'center', behavior: 'smooth' }); c.style.animation = 'none'; void c.offsetWidth; c.style.animation = 'flash 1.6s ease-out';
+    return;
+  }
+  location.hash = '#/principle/' + ids[Math.floor(Math.random() * ids.length)];
 };
+
+function collectionItem(cats, id) {
+  for (const c of cats || []) { const k = c.items.findIndex((i) => i.id === id); if (k !== -1) return { cat: c, item: c.items[k], prev: c.items[k - 1], next: c.items[k + 1] }; }
+  return null;
+}
+function itemPage({ cat, item, prev, next }, base, kind) {
+  const nav = (i, dir) => i ? `<a href="${base}${i.id}"${dir === 'next' ? ' style="text-align:right"' : ''}><div class="card"><div class="dir">${dir === 'next' ? 'Next →' : '← Previous'}</div><div class="nm">${esc(i.name)}</div></div></a>` : '<span style="flex:1"></span>';
+  return `<div class="wrap"><div class="vol-head"><div class="eyebrow">${kind} · ${esc(cat.title)}</div><h2>${esc(item.name)}</h2>
+    ${item.summary ? `<p class="summary">${esc(item.summary)}</p>` : ''}</div>
+    <article class="reader item-body" id="reader">${item.html}</article><div class="pager">${nav(prev, 'prev')}${nav(next, 'next')}</div></div>`;
+}
+route(/^\/principle\/(.+)$/, async ([, id]) => {
+  setTab('library'); const lib = await library();
+  const found = collectionItem(lib.principleCatalog, id); if (!found) { location.hash = '#/principles'; return; }
+  setTop('Design Principle', { back: true, actions: `<button class="icon-btn" data-action="shuffle" aria-label="Random principle">${ICON.shuffle}</button><button class="icon-btn" data-action="type" aria-label="Reading settings">${ICON.type}</button>` });
+  view.innerHTML = itemPage(found, '#/principle/', 'Principle'); scrollTo(0, 0);
+});
+
+route(/^\/algorithms$/, async () => {
+  setTab('library'); setTop('Algorithms', { back: true });
+  const lib = await library(); const cats = lib.algorithms || [];
+  view.innerHTML = `<div class="wrap">${cats.length ? `<p class="muted small" style="margin-top:0">Each entry covers how it works, its costs, where you meet it, how it fails, and the judgment call a DE makes about it.</p>
+    <div class="chips">${cats.map((c, i) => `<a class="chip" href="#/algorithms" data-action="jumpCat" data-i="${i}">${esc(c.title)}</a>`).join('')}</div>${catList(cats, '#/algo/')}`
+    : '<div class="empty">The algorithms collection is being written and will appear here.</div>'}</div>`;
+});
+actions.jumpCat = (b, e) => { e.preventDefault(); $$('.section-title')[+b.dataset.i]?.scrollIntoView({ behavior: 'smooth' }); };
+route(/^\/algo\/(.+)$/, async ([, id]) => {
+  setTab('library'); const lib = await library();
+  const found = collectionItem(lib.algorithms, id); if (!found) { location.hash = '#/algorithms'; return; }
+  setTop('Algorithm', { back: true, actions: `<button class="icon-btn" data-action="type" aria-label="Reading settings">${ICON.type}</button>` });
+  view.innerHTML = itemPage(found, '#/algo/', 'Algorithm'); scrollTo(0, 0);
+});
+
+route(/^\/review$/, async (m, q) => {
+  setTab('library'); setTop('Review Mode', { back: true, actions: `<button class="icon-btn" data-action="type" aria-label="Reading settings">${ICON.type}</button>` });
+  const lib = await library(); const only = +q.get('vol') || 0;
+  const vols = lib.volumes.filter((v) => v.ready);
+  const shown = vols.filter((v) => !only || v.n === only);
+  view.innerHTML = `<div class="wrap">
+    <p class="muted small" style="margin-top:0">The questions that expose weak designs, and each volume's checklist. Read these before an architecture review.</p>
+    <div class="chips" style="margin-bottom:6px"><a class="chip ${!only ? 'on' : ''}" href="#/review">All</a>${vols.map((v) => `<a class="chip ${only === v.n ? 'on' : ''}" href="#/review?vol=${v.n}">${v.n} · ${esc(v.title)}</a>`).join('')}</div>
+    <div class="reader">${shown.map((v) => {
+      const ps = (lib.probes || []).filter((p) => p.vol === v.n);
+      const check = v.sections.find((s) => s.level === 2 && /checklist/i.test(s.title));
+      const compProbe = v.companion?.sections.find((s) => /what-a-de-probes$/.test(s.id));
+      return `<h2 id="r${v.n}">Vol ${v.n} · ${esc(v.title)}</h2>
+        ${ps.map((p) => `<div class="callout de">${p.section ? `<div class="eyebrow" style="margin-bottom:6px">${esc(p.section)}</div>` : ''}${p.html}<div class="small" style="margin-top:8px"><a href="#/vol/${v.n}/${p.id}">Open in volume →</a></div></div>`).join('')}
+        <p class="small">${check ? `<a href="#/vol/${v.n}/${check.id}">Review checklist (${v.checklistCount || ''} items) →</a>` : ''}${compProbe ? ` &nbsp;·&nbsp; <a href="#/vol/${v.n}/${compProbe.id}">More probes in the companion notes →</a>` : ''}</p>`;
+    }).join('')}</div></div>`;
+});
 actions.type = typeSheet;
 
 /* ---------- Search ---------- */
@@ -273,7 +373,10 @@ async function buildIndex() {
     if (!v.ready) { docs.push({ kind: 'vol', title: v.title, where: `Vol ${v.n} · Queued`, text: v.scope, href: `#/vol/${v.n}` }); continue; }
     for (const s of v.sections) docs.push({ kind: 'vol', title: s.title, where: `Vol ${v.n} · ${v.title}`, text: s.text, href: `#/vol/${v.n}/${s.id}` });
   }
-  for (const p of lib.principles) docs.push({ kind: 'principle', title: p.name, where: `Principle · Vol ${p.vol}`, text: textOf(p.html), href: `#/principles?vol=${p.vol}` });
+  for (const v of lib.volumes) if (v.companion) for (const s of v.companion.sections) docs.push({ kind: 'vol', title: s.title, where: `Vol ${v.n} · Companion notes`, text: s.text, href: `#/vol/${v.n}/${s.id}` });
+  for (const p of lib.principles) docs.push({ kind: 'principle', title: p.name, where: `Principle · Vol ${p.vol}`, text: textOf(p.html), href: `#/principles?tab=vol&vol=${p.vol}` });
+  for (const c of lib.principleCatalog || []) for (const i of c.items) docs.push({ kind: 'principle', title: i.name, where: `Design Principle · ${c.title}`, text: i.summary + ' ' + i.text, href: `#/principle/${i.id}` });
+  for (const c of lib.algorithms || []) for (const i of c.items) docs.push({ kind: 'algo', title: i.name, where: `Algorithm · ${c.title}`, text: i.summary + ' ' + i.text, href: `#/algo/${i.id}` });
   for (const s of await db.all('saved')) docs.push({ kind: 'saved', title: s.title, where: `Saved · ${s.source || host(s.url)}`, text: textOf(s.content) || s.excerpt || '', href: `#/read/saved/${encodeURIComponent(s.id)}` });
   for (const l of await laterItems()) docs.push({ kind: 'later', title: l.title || l.url, where: `Read Later · ${host(l.url)}`, text: textOf(l.content) || l.excerpt || '', href: `#/read/later/${encodeURIComponent(l.id)}` });
   for (const d of docs) { d.lt = d.title.toLowerCase(); d.lx = d.text.toLowerCase(); }
@@ -294,7 +397,7 @@ function search(docs, query) {
     if (!ok) continue;
     if (d.lt.includes(query.toLowerCase())) score += 10;
     if (d.lx.includes(query.toLowerCase())) score += 4;
-    if (d.kind === 'principle') score += 2;
+    if (d.kind === 'principle' || d.kind === 'algo') score += 2;
     out.push({ d, score });
   }
   return out.sort((a, b) => b.score - a.score).slice(0, 80);
@@ -311,7 +414,7 @@ route(/^\/search$/, async (m, q) => {
   setTab('search'); setTop('Search');
   const recent = ls.get('recent', []);
   view.innerHTML = `<div class="wrap">
-    <label class="field search-field">${ICON.search}<input id="q" type="search" inputmode="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Search volumes, principles, saved articles" value="${esc(q.get('q') || '')}"></label>
+    <label class="field search-field">${ICON.search}<input id="q" type="search" inputmode="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Search volumes, principles, algorithms, saved" value="${esc(q.get('q') || '')}"></label>
     <div id="results" style="margin-top:14px"></div></div>`;
   const input = $('#q'), out = $('#results');
   searchIndex = await buildIndex();

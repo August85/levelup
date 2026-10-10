@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vol 3 — Networking for Large-Scale Systems: A Working Reference</title>
+<style>
+  body{font-family:Georgia,'Times New Roman',serif;color:#1a2733;max-width:860px;margin:0 auto;padding:48px 24px;line-height:1.65}
+  h1{font-size:1.9rem;border-bottom:3px solid #0a4d8c;padding-bottom:10px}
+  h2{font-size:1.3rem;color:#0a4d8c;margin-top:44px;border-bottom:1px solid #d7dee5;padding-bottom:6px}
+  h3{font-size:1.05rem;margin-top:28px}
+  .sub{color:#5a6b7a;font-family:Verdana,Arial,sans-serif;font-size:.85rem}
+  table{border-collapse:collapse;width:100%;font-family:Verdana,Arial,sans-serif;font-size:.8rem;margin:14px 0}
+  th{text-align:left;border-bottom:2px solid #1a2733;padding:7px 9px}
+  td{border-bottom:1px solid #d7dee5;padding:7px 9px;vertical-align:top}
+  .de{background:#fdf6ec;border-left:4px solid #b7791f;padding:12px 16px;margin:18px 0}
+  .de b:first-child{color:#8a5a12}
+  .warstory{background:#f3f0fa;border-left:4px solid #5b4a8a;padding:12px 16px;margin:18px 0;font-size:.97rem}
+  .fig{margin:22px 0;text-align:center}
+  .figcap{font-family:Verdana,Arial,sans-serif;font-size:.78rem;color:#5a6b7a;margin-top:6px}
+  code{font-family:Consolas,Menlo,monospace;font-size:.88em;background:#eef1f4;padding:1px 5px;border-radius:3px}
+  ul{padding-left:22px}
+  li{margin:5px 0}
+</style>
+</head>
+<body>
+<h1>Volume 3 — Networking for Large-Scale Systems</h1>
+<p class="sub">Part I: Systems Foundations · ~20 printed pages · Companion to Volumes 1–2</p>
+
+<h2>0. Scope and mental model</h2>
+<p>This volume covers the network as an architectural component: transport behavior (TCP, QUIC), naming (DNS), the HTTP generations, load balancing at L4 and L7, proxies and service mesh, CDNs, and a systematic approach to network failure analysis. The organizing idea: <b>every layer of the network stack is both an abstraction and a failure domain</b>. Each layer hides complexity from the one above (TCP hides loss; DNS hides addresses; the LB hides instances; the mesh hides retries) — and each hidden mechanism has characteristic pathologies that surface as mysterious symptoms one or two layers up. Effective network debugging is largely the skill of mapping a symptom at layer N to a mechanism at layer N−1. A second recurring theme: at large scale, most "network problems" are actually <em>state</em> problems — connection tables, NAT mappings, DNS caches, and conntrack entries are distributed mutable state with TTLs, and they fail the way state fails: stale, exhausted, or inconsistent.</p>
+
+<h2>1. TCP: the machinery under everything</h2>
+
+<h3>1.1 Connections are state machines with real costs</h3>
+<p>A TCP connection is established by the three-way handshake (SYN, SYN-ACK, ACK — one round trip before any data), carries ordered reliable bytes with flow control (receiver window) and congestion control (sender-side), and is torn down through FIN states, leaving the closing side in <code>TIME_WAIT</code> for ~60s to absorb stray packets. The practical consequences at scale:</p>
+<ul>
+<li><b>Connection setup is the tax on chatty architectures.</b> One RTT for TCP plus one to two RTTs for TLS means a fresh HTTPS connection costs 2–3× the network round trip before byte one. Connection pooling and keep-alives are therefore not optimizations but structural requirements; a service that opens a new connection per request multiplies its own latency and everyone's CPU (TLS handshakes are expensive).</li>
+<li><b><code>TIME_WAIT</code> and ephemeral port exhaustion.</b> A client (or proxy/NAT) making many short-lived connections to one destination consumes an ephemeral port per connection, each held ~60s after close. At a few thousand connections/second the ~28k default ephemeral range exhausts, and connection attempts fail with errors that look like the <em>server</em> is down. Fixes: pooling (again), more source IPs, tuning reuse settings — but the architectural fix is fewer, longer-lived connections.</li>
+<li><b>Keepalives vs middleboxes.</b> NATs, firewalls, and cloud LBs silently drop idle-connection state (often 350s or less). A pooled connection idle longer than that is dead without either end knowing; the next request hangs until the TCP retransmission timer gives up — minutes. TCP or application-level keepalives below the smallest middlebox timeout are mandatory hygiene for any long-lived connection crossing infrastructure.</li>
+</ul>
+
+<h3>1.2 Congestion control: the algorithm decides your throughput profile</h3>
+<p>The sender maintains a congestion window (cwnd) limiting unacknowledged bytes in flight; throughput ≈ min(cwnd, receiver window) / RTT. Loss-based algorithms (Reno lineage; <b>CUBIC</b> is the Linux default) grow cwnd until packet loss, interpret loss as congestion, and cut the window — which systematically underuses long-fat paths with any random loss, and fills intermediate buffers until they overflow (bufferbloat: high latency <em>caused by</em> full buffers). <b>BBR</b> instead estimates bottleneck bandwidth and min-RTT and paces to that estimate, tolerating random loss and avoiding buffer-filling — typically large wins on lossy WAN/inter-region paths, with fairness caveats when competing against loss-based flows. Two operational facts worth keeping: <b>slow start</b> means every new (or idle-reset) connection ramps from a small window, so short transfers on fresh connections never reach line rate — another argument for warm pooled connections; and after idle periods, cwnd may reset (<code>slow start after idle</code>), which surprises request/response workloads with periodic latency steps.</p>
+
+<h3>1.3 Head-of-line blocking, the recurring villain</h3>
+<p>TCP delivers an ordered byte stream: one lost segment stalls delivery of every byte after it until retransmission completes, even if those bytes belong to logically independent messages multiplexed on the connection. This is <b>transport-level head-of-line (HOL) blocking</b>, and it is the specific defect that motivated QUIC (§2). It also appears in disguise elsewhere: a slow consumer on a multiplexed gRPC channel, a single stalled partition blocking an ordered consumer, one slow shard in a scatter-gather — the general lesson is that <em>multiplexing independent work onto an ordered channel couples the work's fates</em>.</p>
+
+<h2>2. QUIC and the HTTP generations</h2>
+
+<h3>2.1 What QUIC actually changes</h3>
+<p>QUIC is a transport over UDP, in user space, with TLS 1.3 built into its handshake. The deltas that matter architecturally:</p>
+<ul>
+<li><b>Independent streams:</b> loss on one stream never blocks another — transport HOL blocking is gone (HTTP/3's reason to exist).</li>
+<li><b>1-RTT combined handshake, 0-RTT resumption:</b> transport + crypto establish together; resumed sessions can send data in the first flight. (0-RTT data is replayable — servers must restrict it to idempotent requests; a nice example of a transport feature imposing an application-semantics obligation.)</li>
+<li><b>Connection IDs, not 4-tuples:</b> a connection survives client IP/port changes (Wi-Fi→cellular migration; NAT rebinding), which TCP cannot do.</li>
+<li><b>Costs:</b> higher CPU per byte than kernel TCP (user-space processing, per-packet crypto; improving with offloads), UDP being blocked or de-prioritized on some networks (clients must race/fall back to TCP), and middleboxes losing visibility (encrypted transport headers — a deliberate anti-ossification choice that complicates enterprise inspection).</li>
+</ul>
+
+<h3>2.2 HTTP/1.1 vs HTTP/2 vs HTTP/3</h3>
+<table>
+<tr><th></th><th>HTTP/1.1</th><th>HTTP/2</th><th>HTTP/3</th></tr>
+<tr><td>Concurrency model</td><td>One request at a time per connection → browsers open ~6 parallel connections</td><td>Many streams multiplexed on one TCP connection; header compression (HPACK); priorities</td><td>Same semantics on QUIC streams (QPACK)</td></tr>
+<tr><td>HOL blocking</td><td>At the application layer (pipelining unusable in practice)</td><td>Solved at HTTP layer, <b>reintroduced at TCP layer</b> — one loss stalls all streams</td><td>Eliminated at both layers</td></tr>
+<tr><td>Setup cost</td><td>TCP + TLS (2–3 RTT)</td><td>TCP + TLS (2–3 RTT)</td><td>1 RTT; 0-RTT on resumption</td></tr>
+<tr><td>Where it wins</td><td>Simplicity; still ubiquitous server-to-server</td><td>Many small assets per page; gRPC's substrate</td><td>Lossy/mobile networks, connection migration, cold-start latency</td></tr>
+</table>
+
+<div class="fig">
+<svg viewBox="0 0 720 235" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <text x="180" y="22" text-anchor="middle" font-weight="bold" font-size="12">HTTP/2 over TCP</text>
+  <rect x="40" y="40" width="280" height="34" rx="5" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/>
+  <text x="180" y="61" text-anchor="middle" font-size="9.5">stream A ▓ | stream B ▓ | stream C ▓ (one byte stream)</text>
+  <rect x="40" y="92" width="280" height="34" rx="5" fill="#ffffff" stroke="#c0392b" stroke-width="1.6"/>
+  <text x="180" y="106" text-anchor="middle" font-size="9.5" fill="#c0392b">lost segment in stream B's bytes</text>
+  <text x="180" y="120" text-anchor="middle" font-size="9.5" fill="#c0392b">→ A and C stall too (ordered delivery)</text>
+  <text x="540" y="22" text-anchor="middle" font-weight="bold" font-size="12">HTTP/3 over QUIC</text>
+  <rect x="410" y="40" width="84" height="34" rx="5" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="452" y="61" text-anchor="middle" font-size="9.5">stream A ▓</text>
+  <rect x="500" y="40" width="84" height="34" rx="5" fill="#ffffff" stroke="#c0392b" stroke-width="1.6"/><text x="542" y="61" text-anchor="middle" font-size="9.5" fill="#c0392b">stream B ✗</text>
+  <rect x="590" y="40" width="84" height="34" rx="5" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="632" y="61" text-anchor="middle" font-size="9.5">stream C ▓</text>
+  <text x="542" y="106" text-anchor="middle" font-size="9.5">loss on B delays only B;</text>
+  <text x="542" y="120" text-anchor="middle" font-size="9.5">A and C deliver independently</text>
+  <rect x="40" y="150" width="640" height="70" rx="6" fill="#f6f8fa" stroke="#8a97a3"/>
+  <text x="52" y="172" font-size="10">General principle: multiplexing independent work over an <tspan font-weight="bold">ordered</tspan> channel couples failure fates.</text>
+  <text x="52" y="190" font-size="10">The same shape recurs in ordered message partitions, scatter-gather fan-outs, and shared queues —</text>
+  <text x="52" y="206" font-size="10">the remedy is always per-unit independence (streams, partitions, hedged requests, bulkheads).</text>
+</svg>
+<div class="figcap">Fig 1 — Head-of-line blocking: HTTP/2's one-loss-stalls-all vs HTTP/3's independent streams.</div>
+</div>
+
+<div class="de"><b>Architecture review questions:</b> "What is the connection strategy per hop — pool sizes, keep-alive intervals vs the smallest middlebox idle timeout on the path, and reconnect behavior with jitter?" · "Where do fresh connections sit on the hot path (cold-start latency = handshakes × RTT), and is TLS resumption enabled?" · "Any high-connection-churn component (proxy, NAT, crawler): what is the measured ephemeral-port headroom?" · "For cross-region links: which congestion control, and has BBR been evaluated against measured loss rates?"</div>
+
+<h2>3. DNS: naming as a distributed cache</h2>
+
+<h3>3.1 Resolution and its state</h3>
+<div class="fig">
+<svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <rect x="20" y="70" width="100" height="40" rx="6" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/><text x="70" y="94" text-anchor="middle">Client + OS cache</text>
+  <rect x="180" y="70" width="130" height="40" rx="6" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.4"/><text x="245" y="88" text-anchor="middle">Recursive resolver</text><text x="245" y="102" text-anchor="middle" font-size="9">(caches by TTL)</text>
+  <rect x="380" y="16" width="120" height="34" rx="6" fill="#ffffff" stroke="#5a6b7a"/><text x="440" y="37" text-anchor="middle">Root servers</text>
+  <rect x="380" y="70" width="120" height="34" rx="6" fill="#ffffff" stroke="#5a6b7a"/><text x="440" y="91" text-anchor="middle">TLD (.com)</text>
+  <rect x="380" y="124" width="120" height="34" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="440" y="140" text-anchor="middle">Authoritative NS</text><text x="440" y="153" text-anchor="middle" font-size="9">(anycast, GeoDNS)</text>
+  <rect x="570" y="70" width="130" height="40" rx="6" fill="#f6f8fa" stroke="#8a97a3"/><text x="635" y="88" text-anchor="middle">Answer: A/AAAA/</text><text x="635" y="102" text-anchor="middle">CNAME + TTL</text>
+  <line x1="120" y1="90" x2="180" y2="90" stroke="#1a2733" stroke-width="1.3" marker-end="url(#e1)"/>
+  <line x1="310" y1="80" x2="380" y2="38" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#e1)"/>
+  <line x1="310" y1="88" x2="380" y2="86" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#e1)"/>
+  <line x1="310" y1="96" x2="380" y2="138" stroke="#5a6b7a" stroke-width="1.1" marker-end="url(#e1)"/>
+  <line x1="500" y1="140" x2="580" y2="108" stroke="#0a6b3d" stroke-width="1.2" marker-end="url(#e1)"/>
+  <text x="360" y="188" text-anchor="middle" font-size="9.5" fill="#8a5a12">Every box caches. "DNS change" = cache convergence event, bounded below by the old record's TTL — plus resolvers that ignore TTLs.</text>
+  <defs><marker id="e1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 2 — DNS resolution is a hierarchy of caches; propagation delay is TTL arithmetic, not mystery.</div>
+</div>
+
+<h3>3.2 The operational physics of DNS</h3>
+<ul>
+<li><b>TTL is a failover-speed vs load dial.</b> Low TTLs (30–60s) make DNS-based failover responsive but multiply query load and expose every resolver hiccup; long TTLs pin traffic to dead endpoints. Standard discipline: lower TTLs <em>ahead of</em> planned changes, restore afterward. And measure reality: some ISP resolvers and legacy clients clamp or ignore TTLs, so DNS failover always has a stubborn tail — which is why DNS is a coarse traffic-steering tool, not a precision one, and why real failover designs pair it with anycast or client-side endpoint lists.</li>
+<li><b>Negative caching:</b> NXDOMAIN answers are cached too (per the SOA minimum). Querying a name before it exists poisons resolvers with cached absence — a classic self-inflicted launch-day wound.</li>
+<li><b>Anycast:</b> the same IP announced from many sites via BGP; routing delivers each client to the "nearest" site. This is how root servers, public resolvers, and CDN edges achieve both proximity and DDoS dilution. Caveat: routing changes can shift a client mid-flow, which is fine for stateless UDP DNS and is one more reason QUIC's connection IDs matter at anycast edges.</li>
+<li><b>GeoDNS / weighted / health-checked answers</b> make DNS the global load balancer of record for multi-region entry (route by geography, shift weights for canary or evacuation, drop unhealthy regions). Its precision limits come from resolver granularity: the authoritative server sees the resolver's location (mitigated by EDNS Client Subnet), and one corporate resolver may front an entire company.</li>
+<li><b>DNS in service discovery:</b> inside platforms, DNS names backed by service registries (Kubernetes cluster DNS, Consul) inherit all of the above — notably client libraries that resolve once at startup and never re-resolve, which turns any backend IP change into a slow-burn outage. Client resolution behavior (respect TTLs, re-resolve on connection failure) deserves explicit review.</li>
+</ul>
+
+<div class="warstory"><b>Recurring incident shape:</b> a dependency's IPs change (LB scale event, region evacuation). Services using well-behaved HTTP clients recover in seconds; one fleet with a JVM configured to cache DNS forever (historical default: cache successful lookups for the process lifetime) keeps connecting to the old IPs until every instance is restarted. The postmortem line item is always the same: <em>inventory DNS caching behavior per runtime, and set explicit caching policies</em> — resolution behavior is code, not infrastructure.</div>
+
+<h2>4. Load balancing: L4, L7, and the algorithms between</h2>
+
+<h3>4.1 The two layers do different jobs</h3>
+<table>
+<tr><th></th><th>L4 (transport)</th><th>L7 (application)</th></tr>
+<tr><td>Sees</td><td>IPs, ports, connections/flows</td><td>Requests: paths, headers, methods, gRPC services</td></tr>
+<tr><td>Balances</td><td>Connections (per-flow hashing)</td><td>Individual requests (can split one connection's requests across backends)</td></tr>
+<tr><td>Typical form</td><td>Cloud NLB, IPVS, Maglev/Katran-class ECMP + consistent hashing, often with direct server return</td><td>Envoy/NGINX/HAProxy/ALB: routing rules, retries, timeouts, TLS termination, header rewrites</td></tr>
+<tr><td>Strengths</td><td>Enormous throughput, low latency, protocol-agnostic, preserves end-to-end TLS if desired</td><td>Content routing, per-request balancing (crucial for HTTP/2 and gRPC), observability, resilience policies</td></tr>
+<tr><td>Cost</td><td>Coarse: a long-lived heavy connection is invisible to it</td><td>CPU (parsing + TLS), added hop, config complexity that becomes an outage surface</td></tr>
+</table>
+<p>The canonical large-scale stack layers them: anycast/DNS steers to a region → L4 tier (ECMP across stateless-ish forwarders using consistent hashing so any forwarder sends a flow to the same backend) → L7 tier (routing, policy, retries) → services. One detail with outsized consequences: <b>gRPC/HTTP-2 traffic through an L4 balancer alone concentrates load</b>, because many requests share few long-lived connections — per-request (L7) balancing or client-side balancing with a lookaside control plane is required for even distribution.</p>
+
+<h3>4.2 Balancing algorithms and their failure content</h3>
+<ul>
+<li><b>Round robin / least connections:</b> fine for homogeneous requests; least-connections self-corrects for slow backends but can dogpile a newly added (empty) backend — hence slow-start ramping on mature LBs.</li>
+<li><b>The power of two choices:</b> sample two random backends, pick the less loaded — nearly all the benefit of global least-loaded with none of the herd behavior of everyone chasing the same "best" backend on stale load data. The default answer for distributed client-side balancing.</li>
+<li><b>Consistent hashing / ring hash / Maglev:</b> stable request→backend mapping that survives membership churn — essential when backends hold per-key state (caches, session shards); Maglev-style table hashing gives better balance than classic rings at the cost of slightly more disruption on change.</li>
+<li><b>Session affinity ("sticky sessions")</b> is best understood as a liability accepted knowingly: it fights even distribution, complicates drain/deploy, and turns backend loss into user-visible state loss unless state is externalized anyway — at which point stickiness is often unnecessary.</li>
+</ul>
+
+<h3>4.3 Health checking: the LB's model of truth</h3>
+<p>Health checks decide the difference between routing around failure and amplifying it. The essential distinctions: <b>liveness</b> (process up) vs <b>readiness</b> (able to serve <em>now</em> — dependencies warm, caches primed, not draining); <b>active</b> checks (probe endpoint — keep it cheap and dependency-shallow, or the check fails when a soft dependency blips and the LB deserts a healthy fleet) vs <b>passive</b> outlier detection (eject backends whose real-traffic error/latency profile deviates — the practical gray-failure detector, Volume 1 §7). Two safety properties mature systems add: <b>panic thresholds</b> (if "too many" backends look unhealthy, the checker is probably wrong — fail open and route to all rather than concentrate all traffic on the last two "healthy" instances and kill them too) and <b>connection draining</b> on shutdown (stop new work, finish in-flight within a deadline) wired into deploy tooling, so every rollout isn't a micro-outage.</p>
+
+<h2>5. Proxies and service mesh</h2>
+<p>A service mesh moves per-hop network policy — mTLS, retries, timeouts, circuit breaking, load balancing, telemetry — out of application libraries into infrastructure: classically a sidecar proxy (Envoy) per workload programmed by a control plane (Istio-class), increasingly sidecarless variants (eBPF-based data planes, ambient/node-level proxies) that cut the per-pod resource and latency tax. The honest ledger:</p>
+<ul>
+<li><b>What it buys:</b> uniform mTLS and identity (SPIFFE-style) without touching app code; consistent resilience policy across polyglot services; per-hop golden-signal telemetry; traffic shifting (canary, mirroring) as configuration.</li>
+<li><b>What it costs:</b> a proxy hop's latency (sub-millisecond each, but twice per call, times call depth); fleet-wide CPU/memory for proxies; an additional distributed system whose control plane can now cause a global outage class of its own; and configuration surface (a mistyped retry policy is a self-DDoS one YAML away).</li>
+<li><b>The judgment line:</b> mesh value scales with service count × polyglot-ness × compliance pressure (mTLS-everywhere mandates). Small homogeneous estates get most of the benefit from a good shared client library; large heterogeneous ones can't, which is the actual case for mesh. Either way, retries/timeouts configured in the mesh <em>and</em> in applications multiply — one layer must own each policy, explicitly.</li>
+</ul>
+
+<div class="de"><b>Architecture review questions:</b> "For gRPC/HTTP-2: where does per-request balancing happen — and if the answer is 'the NLB', expect hot backends." · "Show the health-check dependency graph: what makes readiness fail, and can a soft dependency's blip desert the fleet? Is there a fail-open panic threshold?" · "Which single layer owns retries and timeouts on each hop, and what is the worst-case multiplication if two layers both retry?" · "What happens during a rolling deploy — drain deadline, in-flight handling, and the measured error rate of a routine rollout?"</div>
+
+<h2>6. CDN architecture</h2>
+
+<h3>6.1 The cache hierarchy</h3>
+<div class="fig">
+<svg viewBox="0 0 720 210" xmlns="http://www.w3.org/2000/svg" font-family="Verdana,Arial,sans-serif" font-size="10.5">
+  <rect x="20" y="80" width="90" height="40" rx="6" fill="#eef4fa" stroke="#0a4d8c" stroke-width="1.4"/><text x="65" y="104" text-anchor="middle">Clients</text>
+  <rect x="160" y="30" width="120" height="40" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="220" y="48" text-anchor="middle">Edge PoP (anycast)</text><text x="220" y="62" text-anchor="middle" font-size="9">TLS, cache, WAF</text>
+  <rect x="160" y="130" width="120" height="40" rx="6" fill="#eaf6ef" stroke="#0a6b3d" stroke-width="1.4"/><text x="220" y="148" text-anchor="middle">Edge PoP</text><text x="220" y="162" text-anchor="middle" font-size="9">hundreds worldwide</text>
+  <rect x="370" y="80" width="130" height="40" rx="6" fill="#fdf6ec" stroke="#b7791f" stroke-width="1.4"/><text x="435" y="98" text-anchor="middle">Origin shield /</text><text x="435" y="112" text-anchor="middle">regional mid-tier</text>
+  <rect x="580" y="80" width="110" height="40" rx="6" fill="#ffffff" stroke="#1a2733" stroke-width="1.4"/><text x="635" y="104" text-anchor="middle">Origin</text>
+  <line x1="110" y1="95" x2="160" y2="55" stroke="#1a2733" stroke-width="1.2" marker-end="url(#f1)"/>
+  <line x1="110" y1="105" x2="160" y2="145" stroke="#1a2733" stroke-width="1.2" marker-end="url(#f1)"/>
+  <line x1="280" y1="55" x2="375" y2="90" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#f1)"/>
+  <line x1="280" y1="145" x2="375" y2="110" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#f1)"/>
+  <line x1="500" y1="100" x2="580" y2="100" stroke="#5a6b7a" stroke-width="1.2" marker-end="url(#f1)"/>
+  <text x="360" y="196" text-anchor="middle" font-size="9.5" fill="#8a5a12">The shield collapses N edge misses into ~1 origin fetch (request coalescing) — origin load scales with content churn, not edge count.</text>
+  <defs><marker id="f1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#1a2733"/></marker></defs>
+</svg>
+<div class="figcap">Fig 3 — CDN hierarchy: edge PoPs, an origin-shield tier, and coalesced origin fetches.</div>
+</div>
+
+<h3>6.2 The decisions that determine CDN effectiveness</h3>
+<ul>
+<li><b>Cache key design:</b> the key is URL + selected headers/cookies/query params. Every extraneous key component (marketing query params, session cookies on static assets, unnormalized parameter order) fragments the cache and silently converts hits to misses. Cache-key normalization is the highest-ROI CDN configuration work.</li>
+<li><b>TTL strategy — immutable vs event-driven:</b> the robust pattern is content-hashed asset URLs cached effectively forever (deploys change the URL, not the object), plus short-TTL-or-purged HTML/API responses. <code>stale-while-revalidate</code> and <code>stale-if-error</code> convert origin latency and origin outages into staleness — usually the right trade, and worth setting deliberately rather than inheriting defaults.</li>
+<li><b>Invalidation:</b> purge-by-URL is dependable; purge-by-tag/surrogate-key (tag every page containing product X; purge the tag when X changes) is what makes caching <em>dynamic</em> content tractable. Global purge latency (seconds to tens of seconds, provider-dependent) sets the floor on "how stale can a price be" conversations — which are product decisions to surface, not infrastructure trivia.</li>
+<li><b>Dynamic acceleration:</b> even uncacheable APIs benefit from riding the CDN: TLS terminates near the client, and the edge→origin leg uses warm connections over managed backbones. Edge compute (request rewriting, A/B bucketing, auth token verification at the edge) moves logic to where the RTTs are cheapest.</li>
+<li><b>Failure posture:</b> a CDN is a giant shared dependency with its own incidents; multi-CDN (DNS-steered) is the hedge, priced in operational complexity (config parity across providers is the hidden cost). Serve-stale-on-origin-failure should be an explicit, tested behavior — it is the CDN's graceful-degradation superpower.</li>
+</ul>
+
+<h2>7. Network failure analysis: a systematic method</h2>
+
+<h3>7.1 Where packets actually die</h3>
+<p>A request path traverses: client stack → NAT/firewall state → DNS answer → anycast/BGP routing → L4 tier (conntrack/flow tables) → L7 proxies (connection pools, buffers) → host virtual networking (veth/bridge/eBPF, security groups) → kernel (accept queues, socket buffers) → application threads. Each hop holds <b>state with limits</b>; the recurring failure families:</p>
+<table>
+<tr><th>Family</th><th>Symptom signature</th><th>Mechanism &amp; first checks</th></tr>
+<tr><td>State-table exhaustion</td><td>New connections fail/timeout under load; existing ones fine</td><td>conntrack table full (dropped SYNs, kernel logs), NAT port exhaustion, LB flow-table limits; check counters before blaming the app</td></tr>
+<tr><td>Idle-state expiry</td><td>First request after a quiet period hangs for minutes, then works</td><td>Middlebox dropped idle-connection state; keepalive interval vs middlebox timeout audit (§1.1)</td></tr>
+<tr><td>MTU / PMTU black holes</td><td>Small requests fine; large payloads/TLS handshakes hang — often only on some paths (VPN, tunnel, one AZ pair)</td><td>ICMP "frag needed" blocked so PMTU discovery fails; overlay/tunnel encapsulation shrinking effective MTU; test with sized pings, check MSS clamping</td></tr>
+<tr><td>Accept-queue overflow</td><td>Retransmitted SYNs, client-side connect latency spikes while server CPU looks fine</td><td>Backlog full because the app accepts too slowly; <code>ListenOverflows</code>/<code>ListenDrops</code> counters tell the truth</td></tr>
+<tr><td>Asymmetric / partial partition</td><td>A→B fails while B→A works; only some pairs affected; "works from my machine"</td><td>ECMP hashing one direction onto a bad path; a single bad link/switch; probe per-path, not per-endpoint (mesh telemetry or pairwise pings)</td></tr>
+<tr><td>Retransmission-induced latency</td><td>p99 latency at suspiciously quantized values (~200ms, 1s, 3s steps)</td><td>Those are retransmission timers — small loss rates surface as latency modes, not as errors; check retrans counters per flow direction</td></tr>
+</table>
+
+<h3>7.2 The debugging discipline</h3>
+<ol style="font-family:Verdana,Arial,sans-serif;font-size:.86rem;line-height:1.85">
+<li><b>Fix the topology first:</b> draw the actual path including every proxy, NAT, mesh sidecar, and overlay — most wrong theories die at this step.</li>
+<li><b>Bisect by layer:</b> does DNS return the right answer (dig from the affected vantage)? Does TCP connect (<code>nc</code>/<code>ss</code>)? Does TLS complete (<code>openssl s_client</code>)? Does the request succeed (<code>curl -v</code> with timing breakdown)? The first failing layer localizes the mechanism.</li>
+<li><b>Compare vantage points:</b> the same probe from inside the pod, the node, another AZ, and outside the platform — differences between vantages are the diagnosis.</li>
+<li><b>Trust counters over narratives:</b> retransmits, conntrack drops, listen overflows, socket-buffer pressure (<code>ss -ti</code>, <code>nstat</code>, LB/mesh metrics) distinguish loss vs delay vs rejection — three different diseases with similar symptoms.</li>
+<li><b>Capture last:</b> a targeted <code>tcpdump</code> at two points (did it leave A? did it reach B?) settles arguments that dashboards cannot; at scale, always-on flow logs and eBPF-based per-hop tracing make this step cheap.</li>
+</ol>
+
+<div class="de"><b>Architecture review questions:</b> "For each hop on the golden path: what stateful limit exists (conntrack, NAT ports, flow tables, accept backlog), what is current headroom, and what alerts at 70%?" · "What is the effective MTU end-to-end across overlays/tunnels, and is MSS clamped where ICMP may be filtered?" · "Can per-path (not per-endpoint) health be observed between AZs/regions — how would an asymmetric partial partition present in the dashboards?" · "Which p99 latency modes correspond to retransmission timers, and would loss show up as latency or as errors in the SLIs?"</div>
+
+<h2>8. Architecture review checklist — networking</h2>
+<ol style="font-family:Verdana,Arial,sans-serif;font-size:.86rem;line-height:1.9">
+<li><b>Connection strategy per hop:</b> pooling, keep-alives below middlebox idle timeouts, reconnect jitter, TLS resumption.</li>
+<li><b>HOL exposure:</b> what independent work shares an ordered channel (HTTP/2 on lossy paths, ordered partitions, scatter-gather) and what decouples it.</li>
+<li><b>DNS behavior as code:</b> per-runtime caching policy, re-resolution on failure, TTL plan for changes, negative-caching awareness.</li>
+<li><b>Per-request balancing for multiplexed protocols;</b> two-choices or consistent hashing chosen deliberately; sticky sessions justified or removed.</li>
+<li><b>Health-check design:</b> readiness vs liveness separation, shallow active checks, passive outlier ejection, fail-open panic threshold, drain wired into deploys.</li>
+<li><b>Retry/timeout ownership:</b> exactly one layer per hop owns each policy; worst-case retry multiplication computed.</li>
+<li><b>CDN:</b> normalized cache keys, immutable-asset pattern, tag-based purge, serve-stale posture tested, origin-shield coalescing on.</li>
+<li><b>State-table inventory:</b> conntrack/NAT/flow/backlog limits known, monitored, alarmed with headroom.</li>
+<li><b>Path observability:</b> per-path probes between zones, retransmit/drop counters in dashboards next to latency.</li>
+<li><b>Failure rehearsal:</b> the last exercised drill for LB failover, CDN origin failure (stale-serve), and DNS-based region evacuation — dated.</li>
+</ol>
+
+<h2>9. Canonical reading</h2>
+<ul>
+<li><i>High Performance Browser Networking</i> — Grigorik (free online) — the best single tour of TCP/TLS/HTTP tradecraft; pair with RFC 9000 (QUIC) skimmed for the design rationale.</li>
+<li>"The Tail at Scale" — Dean &amp; Barroso — hedged requests and why per-hop variability compounds.</li>
+<li>"Maglev: A Fast and Reliable Software Network Load Balancer" (Google) — the template for L4 tiers with consistent hashing.</li>
+<li>Envoy documentation's architecture sections — the clearest practical treatment of L7 balancing, outlier detection, and panic routing.</li>
+<li>Cloudflare and Fastly engineering blogs on anycast, purging, and cache-key design — CDN operational wisdom in primary-source form.</li>
+<li>"BBR: Congestion-Based Congestion Control" (ACM Queue) — why loss-based congestion control underperforms and what replaced it.</li>
+</ul>
+
+<h2>10. Chapter summary — ten sentences to retain</h2>
+<ol style="line-height:1.9">
+<li>Every network layer is an abstraction and a failure domain; debugging maps a symptom at layer N to a mechanism at layer N−1.</li>
+<li>Most large-scale "network problems" are state problems: connection tables, caches, and NAT mappings that go stale, exhaust, or disagree.</li>
+<li>Handshakes cost RTTs, so pooling, keep-alives (below middlebox timeouts), and TLS resumption are structural, not optional.</li>
+<li>Ordered channels couple the fates of multiplexed work; QUIC's per-stream independence is the pattern, and it recurs well beyond transport.</li>
+<li>DNS is a hierarchy of caches — changes propagate at TTL speed, resolution behavior is code, and DNS steers traffic coarsely, not precisely.</li>
+<li>L4 spreads connections; L7 spreads requests — multiplexed protocols (gRPC) need L7 or client-side balancing, or backends run hot.</li>
+<li>Health checking needs readiness/liveness separation, passive outlier detection for gray failures, and fail-open panic behavior.</li>
+<li>Exactly one layer owns each retry and timeout policy per hop; stacked policies multiply into self-inflicted overload.</li>
+<li>CDN effectiveness is cache-key hygiene, immutable assets, tag-based purge, and a deliberate serve-stale posture.</li>
+<li>Small loss rates present as quantized latency modes, not errors — retransmit counters belong on the same dashboard as p99.</li>
+</ol>
+
+<p class="sub" style="margin-top:36px">Companion: Volume 4 (Cloud &amp; Infrastructure) — containers, Kubernetes internals, cloud networking, and multi-region design.</p>
+</body>
+</html>
