@@ -1,62 +1,117 @@
 import UIKit
 import UniformTypeIdentifiers
 
-/// Safari share sheet → "LevelUP": files the page in Read Later and closes.
+/// Share sheet → "LevelUP": files the page in Read Later, shows what happened, and closes.
 final class ShareViewController: UIViewController {
-    private let label = UILabel()
+    private let icon = UIImageView()
+    private let titleLabel = UILabel()
+    private let detailLabel = UILabel()
+    private let doneButton = UIButton(type: .system)
+    private var closed = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.25)
+        view.backgroundColor = UIColor.black.withAlphaComponent(0.3)
+
         let card = UIView()
-        card.backgroundColor = .systemBackground
-        card.layer.cornerRadius = 16
+        card.backgroundColor = .secondarySystemBackground
+        card.layer.cornerRadius = 20
+
+        icon.image = UIImage(systemName: "bookmark.fill")
+        icon.tintColor = .systemIndigo
+        icon.contentMode = .scaleAspectFit
+        icon.preferredSymbolConfiguration = .init(pointSize: 34, weight: .semibold)
+
+        titleLabel.text = "Saving to LevelUP…"
+        titleLabel.font = .preferredFont(forTextStyle: .headline)
+        titleLabel.textAlignment = .center
+        titleLabel.numberOfLines = 0
+
+        detailLabel.font = .preferredFont(forTextStyle: .subheadline)
+        detailLabel.textColor = .secondaryLabel
+        detailLabel.textAlignment = .center
+        detailLabel.numberOfLines = 3
+
+        doneButton.setTitle("Done", for: .normal)
+        doneButton.titleLabel?.font = .preferredFont(forTextStyle: .headline)
+        doneButton.addTarget(self, action: #selector(close), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [icon, titleLabel, detailLabel, doneButton])
+        stack.axis = .vertical
+        stack.spacing = 10
+        stack.alignment = .fill
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
         card.translatesAutoresizingMaskIntoConstraints = false
-        label.text = "Saving to LevelUP…"
-        label.font = .preferredFont(forTextStyle: .headline)
-        label.textAlignment = .center
-        label.numberOfLines = 0
-        label.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(label)
         view.addSubview(card)
         NSLayoutConstraint.activate([
             card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             card.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            card.widthAnchor.constraint(equalToConstant: 260),
-            label.topAnchor.constraint(equalTo: card.topAnchor, constant: 24),
-            label.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -24),
-            label.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            label.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            card.widthAnchor.constraint(equalToConstant: 290),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
         ])
-        Task { await handle() }
+        findLink { [weak self] url, title in self?.save(url: url, title: title) }
     }
 
-    private func handle() async {
+    /// Collects the shared link. Safari, Chrome and other apps hand it over in different shapes
+    /// (a URL, a string, or raw data), so every provider is asked and the first web link wins.
+    private func findLink(_ done: @escaping (URL?, String) -> Void) {
         let items = extensionContext?.inputItems as? [NSExtensionItem] ?? []
-        var url: URL?
-        var title = ""
-        for item in items {
-            if title.isEmpty { title = item.attributedContentText?.string ?? item.attributedTitle?.string ?? "" }
-            for provider in item.attachments ?? [] {
-                if url == nil, provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
-                   let found = try? await provider.loadItem(forTypeIdentifier: UTType.url.identifier) as? URL {
-                    url = found
-                }
-                if url == nil, provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-                   let text = try? await provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) as? String {
-                    url = text.firstURL
-                    if title.isEmpty { title = text }
+        var title = items.lazy.compactMap { $0.attributedContentText?.string ?? $0.attributedTitle?.string }.first ?? ""
+        var urls: [URL] = [], texts: [String] = []
+        let group = DispatchGroup()
+        let lock = NSLock()
+        for provider in items.flatMap({ $0.attachments ?? [] }) {
+            for type in [UTType.url, UTType.plainText] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+                group.enter()
+                provider.loadItem(forTypeIdentifier: type.identifier, options: nil) { value, _ in
+                    lock.lock(); defer { lock.unlock(); group.leave() }
+                    switch value {
+                    case let u as URL: urls.append(u)
+                    case let s as String: texts.append(s)
+                    case let d as Data:
+                        if let u = URL(dataRepresentation: d, relativeTo: nil), u.scheme != nil { urls.append(u) }
+                        else if let s = String(data: d, encoding: .utf8) { texts.append(s) }
+                    default: break
+                    }
                 }
             }
         }
-        if let url, url.scheme?.hasPrefix("http") == true {
-            if title == url.absoluteString { title = "" }
-            SharedQueue.push(url: url.absoluteString, title: title)
-            label.text = "Saved to Read Later"
-        } else {
-            label.text = "There's no web link to save here."
+        group.notify(queue: .main) {
+            let web = urls.first { $0.scheme?.hasPrefix("http") == true } ?? texts.lazy.compactMap(\.firstURL).first
+            if title.isEmpty, let t = texts.first(where: { $0.firstURL == nil }) { title = t }
+            done(web, title)
         }
-        try? await Task.sleep(nanoseconds: 700_000_000)
+    }
+
+    private func save(url: URL?, title: String) {
+        guard let url else {
+            show("No web link here", "LevelUP saves web pages. Try sharing from the page itself.", symbol: "link.badge.plus", color: .systemOrange)
+            return
+        }
+        let name = title == url.absoluteString ? "" : title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard SharedQueue.push(url: url.absoluteString, title: name) else {
+            show("Couldn't save", "This build can't reach LevelUP's shared storage. In Xcode, check that both targets list the App Group group.com.august85.levelup under Signing & Capabilities.",
+                 symbol: "exclamationmark.triangle.fill", color: .systemRed)
+            return
+        }
+        show("Saved to Read Later", name.isEmpty ? (url.host ?? url.absoluteString) : name, symbol: "checkmark.circle.fill", color: .systemGreen)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in self?.close() }
+    }
+
+    private func show(_ title: String, _ detail: String, symbol: String, color: UIColor) {
+        titleLabel.text = title
+        detailLabel.text = detail
+        icon.image = UIImage(systemName: symbol)
+        icon.tintColor = color
+    }
+
+    @objc private func close() {
+        guard !closed else { return }
+        closed = true
         extensionContext?.completeRequest(returningItems: nil)
     }
 }

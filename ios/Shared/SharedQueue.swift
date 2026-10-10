@@ -13,11 +13,19 @@ enum SharedQueue {
 
     private static var defaults: UserDefaults? { UserDefaults(suiteName: groupID) }
 
-    static func push(url: String, title: String) {
-        guard let defaults else { return }
+    /// False when this build isn't signed with the App Group, so the app and the share button can't see each other.
+    static var isAvailable: Bool {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) != nil
+    }
+
+    @discardableResult
+    static func push(url: String, title: String) -> Bool {
+        guard isAvailable, let defaults else { return false }
         var list = pending()
         list.append(Pending(url: url, title: title, addedAt: Date()))
-        if let data = try? JSONEncoder().encode(list) { defaults.set(data, forKey: key) }
+        guard let data = try? JSONEncoder().encode(list) else { return false }
+        defaults.set(data, forKey: key)
+        return true
     }
 
     static func pending() -> [Pending] {
