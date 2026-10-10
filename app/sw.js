@@ -1,6 +1,6 @@
 // Offline support: the app shell and library are precached; feeds and the read-later inbox
 // are network-first with the last copy kept for offline use.
-const VERSION = '9da8e20960';
+const VERSION = '1dbe0fedb6';
 const SHELL = `levelup-shell-${VERSION}`;
 const DATA = 'levelup-data';
 const ASSETS = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'data/library.json',
