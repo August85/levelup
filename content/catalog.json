@@ -1,0 +1,39 @@
+{
+  "title": "Distinguished Engineer Knowledge Library",
+  "subtitle": "A working reference for the transition from Principal to Distinguished Engineer.",
+  "howTo": "Read a volume end-to-end once, then return to its \"What a DE Probes\" and checklist sections before architecture reviews. The one-page refresher (Volume 22) condenses the entire map.",
+  "parts": [
+    {"id": "I", "title": "Systems Foundations", "volumes": [
+      {"n": 1, "title": "Distributed Systems", "scope": "Consensus, replication, partitioning, consistency models, time and ordering, failure taxonomy, idempotency, backpressure"},
+      {"n": 2, "title": "Databases", "scope": "Storage engines (B-tree/LSM), WAL, MVCC, isolation levels, distributed SQL, sharding, replication topologies, query optimization"},
+      {"n": 3, "title": "Networking", "scope": "TCP/QUIC, DNS, HTTP/2/3, proxies, L4/L7 load balancing, service mesh, CDN, failure analysis"},
+      {"n": 4, "title": "Cloud & Infrastructure", "scope": "Kubernetes internals, container runtimes, compute/storage/network architecture, multi-region design"},
+      {"n": 5, "title": "Capacity & Hardware Fundamentals", "scope": "CPU/memory hierarchy, NUMA, storage media, network hardware, latency numbers, where performance intuition comes from"}
+    ]},
+    {"id": "II", "title": "Production Excellence", "volumes": [
+      {"n": 6, "title": "Reliability Engineering", "scope": "SLO/SLA/SLI, error budgets, observability, incident management, graceful degradation, disaster recovery"},
+      {"n": 7, "title": "Performance Engineering", "scope": "Latency decomposition, queueing theory, caching, concurrency, profiling, capacity modeling"},
+      {"n": 8, "title": "Resilience Testing", "scope": "Chaos engineering, fault injection, DR game days, load testing at scale"},
+      {"n": 9, "title": "Security Architecture", "scope": "Threat modeling, OAuth/OIDC, PKI/TLS, secrets management, IAM, zero trust, supply-chain security, cloud security"},
+      {"n": 10, "title": "Privacy, Compliance & Data Protection", "scope": "PCI-DSS, CCPA/GDPR, data classification, retention, encryption at rest/in transit, audit"}
+    ]},
+    {"id": "III", "title": "Data & AI", "volumes": [
+      {"n": 11, "title": "Data Architecture", "scope": "Streaming, Kafka, CDC, lakehouse, warehouses, governance, data contracts"},
+      {"n": 12, "title": "AI Architecture", "scope": "LLM systems, agents, RAG, memory, evals, inference and model serving, safety and guardrails"}
+    ]},
+    {"id": "IV", "title": "Architecture at Enterprise Scale", "volumes": [
+      {"n": 13, "title": "Enterprise Architecture", "scope": "Platform boundaries, event architecture, build-vs-buy, migrations, legacy modernization"},
+      {"n": 14, "title": "API & Contract Design", "scope": "Versioning, compatibility, REST/gRPC/GraphQL trade-offs, schema evolution, deprecation at scale"},
+      {"n": 15, "title": "Platform Engineering & Developer Experience", "scope": "Paved roads, golden paths, internal platforms as products, DevEx metrics"},
+      {"n": 16, "title": "Architecture Governance", "scope": "Standards, RFC/ADR processes, architecture review boards, platform strategy"},
+      {"n": 17, "title": "FinOps", "scope": "Unit economics, cloud cost modeling, GPU economics, cost attribution and showback"}
+    ]},
+    {"id": "V", "title": "The Human Layer", "volumes": [
+      {"n": 18, "title": "Sociotechnical Architecture", "scope": "Conway's law, team topologies, cognitive load, org design as an architecture tool"},
+      {"n": 19, "title": "Technical Leadership", "scope": "Influence without authority, resolving architectural disagreements, mentoring Principals, DE operating models"},
+      {"n": 20, "title": "Executive Communication", "scope": "Compressing a 40-page problem into a 5-minute decision, writing for VPs, narrative memos"},
+      {"n": 21, "title": "Technology Strategy", "scope": "Spotting technology shifts; adopt / ignore / experiment frameworks; horizon planning"},
+      {"n": 22, "title": "The One-Page Refresher", "scope": "Printable distillation of the entire map, built after all volumes are complete"}
+    ]}
+  ]
+}
