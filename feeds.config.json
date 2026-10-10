@@ -1,27 +1,91 @@
 {
   "blogs": [
-    {"name": "Anthropic", "url": "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml", "site": "https://www.anthropic.com/news"},
-    {"name": "OpenAI", "url": "https://openai.com/news/rss.xml", "site": "https://openai.com/news"},
-    {"name": "Google DeepMind", "url": "https://deepmind.google/blog/rss.xml", "site": "https://deepmind.google/discover/blog/"},
-    {"name": "Google Research", "url": "https://research.google/blog/rss/", "site": "https://research.google/blog/"},
-    {"name": "Meta AI", "url": "https://ai.meta.com/blog/rss/", "site": "https://ai.meta.com/blog/"},
-    {"name": "Hugging Face", "url": "https://huggingface.co/blog/feed.xml", "site": "https://huggingface.co/blog"},
-    {"name": "Simon Willison", "url": "https://simonwillison.net/atom/everything/", "site": "https://simonwillison.net"},
-    {"name": "Lilian Weng", "url": "https://lilianweng.github.io/index.xml", "site": "https://lilianweng.github.io"},
-    {"name": "Chip Huyen", "url": "https://huyenchip.com/feed.xml", "site": "https://huyenchip.com/blog/"},
-    {"name": "Eugene Yan", "url": "https://eugeneyan.com/rss/", "site": "https://eugeneyan.com"},
-    {"name": "Sebastian Raschka", "url": "https://magazine.sebastianraschka.com/feed", "site": "https://magazine.sebastianraschka.com"},
-    {"name": "Import AI", "url": "https://importai.substack.com/feed", "site": "https://importai.substack.com"},
-    {"name": "The Gradient", "url": "https://thegradient.pub/rss/", "site": "https://thegradient.pub"},
-    {"name": "Interconnects", "url": "https://www.interconnects.ai/feed", "site": "https://www.interconnects.ai"},
-    {"name": "Latent Space", "url": "https://www.latent.space/feed", "site": "https://www.latent.space"}
+    {
+      "name": "Anthropic",
+      "url": "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml",
+      "site": "https://www.anthropic.com/news"
+    },
+    {
+      "name": "OpenAI",
+      "url": "https://openai.com/news/rss.xml",
+      "site": "https://openai.com/news"
+    },
+    {
+      "name": "Google DeepMind",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "site": "https://deepmind.google/discover/blog/"
+    },
+    {
+      "name": "Google Research",
+      "url": "https://research.google/blog/rss/",
+      "site": "https://research.google/blog/"
+    },
+    {
+      "name": "Hugging Face",
+      "url": "https://huggingface.co/blog/feed.xml",
+      "site": "https://huggingface.co/blog"
+    },
+    {
+      "name": "Simon Willison",
+      "url": "https://simonwillison.net/atom/everything/",
+      "site": "https://simonwillison.net"
+    },
+    {
+      "name": "Lilian Weng",
+      "url": "https://lilianweng.github.io/index.xml",
+      "site": "https://lilianweng.github.io"
+    },
+    {
+      "name": "Chip Huyen",
+      "url": "https://huyenchip.com/feed.xml",
+      "site": "https://huyenchip.com/blog/"
+    },
+    {
+      "name": "Eugene Yan",
+      "url": "https://eugeneyan.com/rss/",
+      "site": "https://eugeneyan.com"
+    },
+    {
+      "name": "Sebastian Raschka",
+      "url": "https://magazine.sebastianraschka.com/feed",
+      "site": "https://magazine.sebastianraschka.com"
+    },
+    {
+      "name": "Import AI",
+      "url": "https://jack-clark.net/feed/",
+      "site": "https://jack-clark.net"
+    },
+    {
+      "name": "The Gradient",
+      "url": "https://thegradient.pub/rss/",
+      "site": "https://thegradient.pub"
+    },
+    {
+      "name": "Interconnects",
+      "url": "https://www.interconnects.ai/feed",
+      "site": "https://www.interconnects.ai"
+    },
+    {
+      "name": "Latent Space",
+      "url": "https://www.latent.space/feed",
+      "site": "https://www.latent.space"
+    }
   ],
   "hackerNews": {
-    "queries": ["LLM", "AI agents", "Anthropic", "OpenAI", "inference", "RAG", "transformer"],
+    "queries": [
+      "LLM",
+      "AI agents",
+      "Anthropic",
+      "OpenAI",
+      "inference",
+      "RAG",
+      "transformer"
+    ],
     "minPoints": 80,
     "days": 7
   },
   "maxPerBlog": 8,
   "maxAgeDays": 60,
-  "extractFullText": 40
+  "extractFullText": 40,
+  "minPerBlog": 3
 }

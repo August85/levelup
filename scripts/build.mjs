@@ -111,7 +111,7 @@ function htmlVolume(src, n) {
 // Collections (algorithms, principles): "## Category" then "### Item" blocks with a "> one-liner".
 function collection(md, prefix) {
   const cats = []; let cat = null, item = null;
-  const flush = () => { if (item) { item.html = render(item.body.join('\n'), `${item.id}-`); item.text = toText(item.html); delete item.body; } };
+  const flush = () => { if (item) { item.html = render(item.body.join('\n'), `${item.id}-`).replace(/<p><strong>([^<]+?)\.<\/strong>/g, '<p><strong>$1</strong>'); item.text = toText(item.html); delete item.body; } };
   for (const line of md.split('\n')) {
     let m;
     if ((m = line.match(/^## (.+)/))) { flush(); item = null; cat = { title: m[1].trim(), items: [] }; cats.push(cat); continue; }

@@ -52,8 +52,11 @@ async function blogs() {
     try {
       const items = parseFeed(await get(b.url), b)
         .map((i) => ({ ...i, ts: Date.parse(i.date) || 0 }))
-        .filter((i) => i.url && i.title && (!i.ts || i.ts > cutoff))
-        .sort((a, z) => z.ts - a.ts).slice(0, cfg.maxPerBlog);
+        .filter((i) => i.url && i.title)
+        .sort((a, z) => z.ts - a.ts)
+        // Recent posts up to maxPerBlog, but always keep a few from blogs that post rarely.
+        .filter((i, k) => k < (cfg.minPerBlog || 0) || !i.ts || i.ts > cutoff)
+        .slice(0, cfg.maxPerBlog);
       console.log(`ok   ${b.name}: ${items.length}`);
       return items;
     } catch (e) { console.log(`fail ${b.name}: ${e.message}`); return []; }
